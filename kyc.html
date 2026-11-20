@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>KYC — верификация личности</title>
+<style>
+  :root { color-scheme: light dark; font: 16px/1.45 system-ui; }
+  body { margin: 0; padding: 24px; max-width: 860px; }
+  h1 { font-size: 1.4rem; }
+  button { font: inherit; padding: 9px 14px; margin: 4px 6px 4px 0; }
+  video { display: block; width: 100%; max-height: 46vh; background: #111; margin: 14px 0; }
+  video[hidden] { display: none; }
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; }
+  th, td { border: 1px solid #8884; padding: 7px 9px; text-align: left; vertical-align: top; }
+  td:first-child { white-space: nowrap; }
+  .ok { color: #1a8f3c; font-weight: 700; }
+  .bad { color: #d33; font-weight: 700; }
+  .mono { font-family: ui-monospace, Menlo, monospace; font-size: 0.8rem; word-break: break-all; }
+  #command { font-size: 1.2rem; font-weight: 700; margin: 6px 0; }
+  #motion { font-family: ui-monospace, Menlo, monospace; }
+  #verdict { font-size: 1.1rem; font-weight: 700; margin-top: 14px; padding: 12px; border-radius: 8px; }
+  .risk-low { background: #1a8f3c22; color: #1a8f3c; }
+  .risk-high { background: #d332; color: #d33; }
+  meter { width: 200px; vertical-align: middle; }
+</style>
+</head>
+<body>
+  <h1>KYC — верификация личности</h1>
+  <p>Сайт запрашивает фронтальную камеру и проверяет, что видео действительно живое и пришло с честного устройства. Модель проверок повторяет публичные сигналы Persona: отпечаток, гео/VPN-детект, liveness с позами.</p>
+  <button id="start">Начать верификацию</button>
+  <button id="liveness" disabled>Активная liveness (позы Persona: влево/центр/вправо)</button>
+  <video id="video" autoplay muted playsinline hidden></video>
+  <p id="command">Команда: —</p>
+  <p id="motion">Движение: —</p>
+
+  <table>
+    <thead><tr><th>Проверка</th><th>Результат</th><th>Детали</th></tr></thead>
+    <tbody id="checks"></tbody>
+  </table>
+
+  <div id="verdict" hidden></div>
+
+<script>
+  const start = document.getElementById('start');
+  const livenessBtn = document.getElementById('liveness');
+  const video = document.getElementById('video');
+  const checks = document.getElementById('checks');
+  const command = document.getElementById('command');
+  const motionEl = document.getElementById('motion');
+  const verdict = document.getElementById('verdict');
+
+  let stream = null;
+  let track = null;
+
+  function row(name, ok, detail) {
+    const tr = document.createElement('tr');
+    const n = document.createElement('td'); n.textContent = name;
+    const r = document.createElement('td');
+    r.innerHTML = ok ? '<span class="ok">✔ пройдено</span>' : '<span class="bad">✘ подозрительно</span>';
+    const d = document.createElement('td');
+    d.className = 'mono'; d.textContent = detail;
+    tr.append(n, r, d);
+    checks.append(tr);
+    return ok;
+  }
+
+  function ipCountry() {
+    return fetch('https://ipapi.co/json/', {cache: 'no-store'})
+      .then(r => r.json())
+      .then(j => ({country: j.country_code, city: j.city, ip: j.ip, org: j.org}))
+      .catch(() => null);
+  }
+
+  async function runStaticChecks() {
+    checks.innerHTML = '';
+    let pass = 0, total = 0;
+
+    // 1. Метка трека
+    total++;
+    if (row('Метка камеры (label)', !!track.label && track.label.length > 0, JSON.stringify(track.label))) pass++;
+
+    // 2. facingMode
+    total++;
+    const s = track.getSettings();
+    const facing = s.facingMode;
+    if (row('facingMode задан', facing === 'user' || facing === 'environment', JSON.stringify(facing))) pass++;
+
+    // 3. deviceId в списке устройств
+    total++;
+    let devices = [];
+    try { devices = await navigator.mediaDevices.enumerateDevices(); } catch {}
+    const ids = devices.map(d => d.deviceId);
+    const inList = ids.includes(s.deviceId);
+    if (row('deviceId есть в enumerateDevices', inList, 'трек: ' + (s.deviceId || '—') + '\nсписок: ' + JSON.stringify(ids))) pass++;
+
+    // 4. Геолокация
+    total++;
+    let geo = null;
+    try {
+      geo = await new Promise((res, rej) =>
+        navigator.geolocation.getCurrentPosition(res, rej, {timeout: 4000}));
+    } catch (e) { geo = null; }
+    if (geo) {
+      const c = geo.coords;
+      if (row('Геолокация доступна', true, c.latitude.toFixed(4) + ', ' + c.longitude.toFixed(4))) pass++;
+    } else {
+      row('Геолокация доступна', false, 'отказано / нет данных');
+    }
+
+    // 5. Таймзона / язык / IP
+    total++;
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const lang = navigator.language;
+    const ip = await ipCountry();
+    const ipCountryCode = ip ? ip.country : null;
+    // Германия ожидает таймзону Europe/Berlin и язык de-*
+    const tzOk = tz === 'Europe/Berlin';
+    const langOk = (lang || '').toLowerCase().startsWith('de');
+    const ipOk = ipCountryCode === 'DE';
+    const geoOk = tzOk && langOk && ipOk;
+    if (row('Гео-согласованность (таймзона/язык/IP)',
+        geoOk,
+        'таймзона=' + tz + '\nязык=' + lang + '\nIP=' + (ip ? ipCountryCode + ' (' + ip.ip + ')' : 'нет данных'))) pass++;
+
+    // 6. Похож на Safari, а не на голый WebView
+    total++;
+    const ua = navigator.userAgent;
+    const safariLike = /\bVersion\//.test(ua) && /Safari\//.test(ua);
+    if (row('UA похож на Safari', safariLike, ua)) pass++;
+
+    // 7. IP не похож на датацентр/VPN (эвристика по имени организации,
+    //    как у Persona: детект VPN/Tor/прокси по сетевому слою)
+    total++;
+    const hosting = /\b(hosting|cloud|vps|datacenter|digitalocean|amazon|aws|google|microsoft|azure|ovh|hetzner|linode|vultr|contabo|oracle|alibaba|tencent|m247|datacamp|cogent|psychz|leaseweb)\b/i;
+    const hostingHit = !!(ip?.org && hosting.test(ip.org));
+    if (row('IP не похож на датацентр/VPN (эвристика)', !hostingHit,
+        'org: ' + (ip?.org ?? 'нет данных'))) pass++;
+
+    const risk = total - pass;
+    verdict.hidden = false;
+    verdict.className = risk === 0 ? 'risk-low' : 'risk-high';
+    verdict.textContent = risk === 0
+      ? `Верификация пройдена: ${pass}/${total} проверок чисто.`
+      : `Подозрение: ${risk} из ${total} проверок не прошли.`;
+  }
+
+  // ── Активная liveness ─────────────────────────────────────────
+  // Три позы, как в Selfie Verification у Persona: влево / в центр / вправо.
+  // Порядок каждый раз случайный — запись с фиксированным порядком не сможет ответить.
+  const POSES = [
+    { key: 'left',   text: 'Поверните голову ВЛЕВО' },
+    { key: 'center', text: 'Смотрите В ЦЕНТР' },
+    { key: 'right',  text: 'Поверните голову ВПРАВО' }
+  ];
+
+  function shuffle(list) {
+    const copy = list.slice();
+    for (let i = copy.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [copy[i], copy[j]] = [copy[j], copy[i]];
+    }
+    return copy;
+  }
+
+  function signature() {
+    const c = document.createElement('canvas');
+    c.width = 48; c.height = 32;
+    const g = c.getContext('2d', {willReadFrequently: true});
+    g.drawImage(video, 0, 0, 48, 32);
+    const d = g.getImageData(0, 0, 48, 32).data;
+    const sig = new Uint8Array(48 * 32);
+    for (let i = 0, j = 0; i < d.length; i += 4, j++) sig[j] = d[i];
+    return sig;
+  }
+
+  function diff(a, b) {
+    let s = 0;
+    for (let i = 0; i < a.length; i++) s += Math.abs(a[i] - b[i]);
+    return s / a.length;
+  }
+
+  function liveness() {
+    return new Promise(resolve => {
+      const order = shuffle(POSES);
+      let step = 0;
+      let loopHit = false;
+      const history = [];
+      let prev = null;
+      let energy = 0;
+      const energyLog = [];
+      const startTime = performance.now();
+      command.textContent = 'Позы (случайный порядок): ' + order.map(p => p.key).join(' → ') +
+        ' | Сейчас: ' + order[0].text;
+
+      const timer = setInterval(() => {
+        if (video.videoWidth === 0) return;
+        const sig = signature();
+        if (prev) {
+          energy = Math.max(energy, diff(sig, prev));
+          history.push({t: performance.now() - startTime, sig});
+          // Детектор зацикливания: почти нулевая разница с кадром > 1 c назад.
+          for (const h of history) {
+            if (performance.now() - startTime - h.t > 1000 && diff(sig, h.sig) < 0.5) {
+              loopHit = true; break;
+            }
+          }
+        } else {
+          history.push({t: performance.now() - startTime, sig});
+        }
+        prev = sig;
+        motionEl.textContent = 'Движение: ' + energy.toFixed(2) +
+          (loopHit ? '  |  ⚠ повтор кадра (цикл) — это запись' : '');
+      }, 120);
+
+      const stepTimer = setInterval(() => {
+        energyLog.push(energy);
+        energy = 0;
+        step++;
+        if (step >= order.length) {
+          clearInterval(timer);
+          clearInterval(stepTimer);
+          const moved = energyLog.some(e => e > 1.5);
+          const ok = moved && !loopHit;
+          command.textContent = 'Позы: ' + order.map(p => p.key).join(' → ') +
+            ' | Движение: ' + energyLog.map(e => e.toFixed(1)).join(' / ') +
+            ' — ' + (ok ? 'выполнено' : 'НЕ выполнено / запись');
+          resolve(ok);
+        } else {
+          command.textContent = 'Сейчас: ' + order[step].text;
+        }
+      }, 2200);
+    });
+  }
+
+  start.onclick = async () => {
+    start.disabled = true;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({video: {facingMode: 'user'}, audio: false});
+      track = stream.getVideoTracks()[0];
+      video.srcObject = stream;
+      video.hidden = false;
+      livenessBtn.disabled = false;
+      await runStaticChecks();
+    } catch (e) {
+      row('Получить камеру', false, String(e.message || e));
+      verdict.hidden = false;
+      verdict.className = 'risk-high';
+      verdict.textContent = 'Камеру получить не удалось.';
+    }
+  };
+
+  livenessBtn.onclick = async () => {
+    livenessBtn.disabled = true;
+    await liveness();
+  };
+
+  window.addEventListener('pagehide', () => { stream?.getTracks().forEach(t => t.stop()); });
+</script>
+</body>
+</html>
