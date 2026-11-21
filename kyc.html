@@ -17,12 +17,11 @@
   .ok { color: #1a8f3c; font-weight: 700; }
   .bad { color: #d33; font-weight: 700; }
   .mono { font-family: ui-monospace, Menlo, monospace; font-size: 0.8rem; word-break: break-all; }
-  #command { font-size: 1.2rem; font-weight: 700; margin: 6px 0; }
+  #command { font-size: 1.1rem; font-weight: 700; margin: 6px 0; }
   #motion { font-family: ui-monospace, Menlo, monospace; }
   #verdict { font-size: 1.1rem; font-weight: 700; margin-top: 14px; padding: 12px; border-radius: 8px; }
   .risk-low { background: #1a8f3c22; color: #1a8f3c; }
   .risk-high { background: #d332; color: #d33; }
-  meter { width: 200px; vertical-align: middle; }
 </style>
 </head>
 <body>
@@ -76,17 +75,14 @@
     checks.innerHTML = '';
     let pass = 0, total = 0;
 
-    // 1. Метка трека
     total++;
     if (row('Метка камеры (label)', !!track.label && track.label.length > 0, JSON.stringify(track.label))) pass++;
 
-    // 2. facingMode
     total++;
     const s = track.getSettings();
     const facing = s.facingMode;
     if (row('facingMode задан', facing === 'user' || facing === 'environment', JSON.stringify(facing))) pass++;
 
-    // 3. deviceId в списке устройств
     total++;
     let devices = [];
     try { devices = await navigator.mediaDevices.enumerateDevices(); } catch {}
@@ -94,7 +90,6 @@
     const inList = ids.includes(s.deviceId);
     if (row('deviceId есть в enumerateDevices', inList, 'трек: ' + (s.deviceId || '—') + '\nсписок: ' + JSON.stringify(ids))) pass++;
 
-    // 4. Геолокация
     total++;
     let geo = null;
     try {
@@ -108,13 +103,11 @@
       row('Геолокация доступна', false, 'отказано / нет данных');
     }
 
-    // 5. Таймзона / язык / IP
     total++;
     const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
     const lang = navigator.language;
     const ip = await ipCountry();
     const ipCountryCode = ip ? ip.country : null;
-    // Германия ожидает таймзону Europe/Berlin и язык de-*
     const tzOk = tz === 'Europe/Berlin';
     const langOk = (lang || '').toLowerCase().startsWith('de');
     const ipOk = ipCountryCode === 'DE';
@@ -123,24 +116,17 @@
         geoOk,
         'таймзона=' + tz + '\nязык=' + lang + '\nIP=' + (ip ? ipCountryCode + ' (' + ip.ip + ')' : 'нет данных'))) pass++;
 
-    // 6. Похож на Safari, а не на голый WebView
     total++;
     const ua = navigator.userAgent;
     const safariLike = /\bVersion\//.test(ua) && /Safari\//.test(ua);
     if (row('UA похож на Safari', safariLike, ua)) pass++;
 
-    // 7. IP не похож на датацентр/VPN (эвристика по имени организации,
-    //    как у Persona: детект VPN/Tor/прокси по сетевому слою)
     total++;
     const hosting = /\b(hosting|cloud|vps|datacenter|digitalocean|amazon|aws|google|microsoft|azure|ovh|hetzner|linode|vultr|contabo|oracle|alibaba|tencent|m247|datacamp|cogent|psychz|leaseweb)\b/i;
     const hostingHit = !!(ip?.org && hosting.test(ip.org));
     if (row('IP не похож на датацентр/VPN (эвристика)', !hostingHit,
         'org: ' + (ip?.org ?? 'нет данных'))) pass++;
 
-    return {pass, total};
-  }
-
-  function renderVerdict(pass, total) {
     const risk = total - pass;
     verdict.hidden = false;
     verdict.className = risk === 0 ? 'risk-low' : 'risk-high';
@@ -149,47 +135,6 @@
       : `Подозрение: ${risk} из ${total} проверок не прошли.`;
   }
 
-  async function runAudioCheck(context) {
-    let pass = 0, total = 0;
-    total++;
-    const audio = stream ? stream.getAudioTracks()[0] : null;
-    if (!audio) {
-      row('Звук с микрофона', false, 'аудиодорожки нет');
-      return {pass, total};
-    }
-    if (!context) {
-      row('Звук с микрофона', false, 'AudioContext недоступен в этом браузере');
-      return {pass, total};
-    }
-    try {
-      if (context.state === 'suspended') await context.resume();
-      const source = context.createMediaStreamSource(new MediaStream([audio]));
-      const analyser = context.createAnalyser();
-      analyser.fftSize = 2048;
-      source.connect(analyser);
-      const buffer = new Float32Array(analyser.fftSize);
-      let peak = 0;
-      for (let i = 0; i < 12; i++) {
-        await new Promise(resolve => setTimeout(resolve, 100));
-        analyser.getFloatTimeDomainData(buffer);
-        let sum = 0;
-        for (const value of buffer) sum += value * value;
-        peak = Math.max(peak, Math.sqrt(sum / buffer.length));
-      }
-      source.disconnect();
-      const db = 20 * Math.log10(peak || 1e-9);
-      const ok = peak > 1e-4;
-      if (row('Звук: не цифровая тишина', ok,
-          'уровень ' + db.toFixed(0) + ' дБ, RMS ' + peak.toExponential(2))) pass++;
-    } catch (error) {
-      row('Звук: не цифровая тишина', false, String(error.message || error));
-    }
-    return {pass, total};
-  }
-
-  // ── Активная liveness ─────────────────────────────────────────
-  // Три позы, как в Selfie Verification у Persona: влево / в центр / вправо.
-  // Порядок каждый раз случайный — запись с фиксированным порядком не сможет ответить.
   const POSES = [
     { key: 'left',   text: 'Поверните голову ВЛЕВО' },
     { key: 'center', text: 'Смотрите В ЦЕНТР' },
@@ -222,9 +167,6 @@
     return s / a.length;
   }
 
-  // Фазы: пауза → поза → пауза → поза.
-  // Паузы обязательны: живой человек по команде замирает, а запись
-  // продолжает двигаться — это и выдаёт проигрываемый файл.
   function liveness() {
     return new Promise(resolve => {
       const turns = shuffle(POSES.filter(p => p.key !== 'center')).slice(0, 2);
@@ -249,7 +191,6 @@
         if (prev) {
           currentMax = Math.max(currentMax, diff(sig, prev));
           history.push({t, sig});
-          // Детектор зацикливания: почти нулевая разница с кадром > 1 c назад.
           for (const h of history) {
             if (t - h.t > 1000 && diff(sig, h.sig) < 0.5) { loopHit = true; break; }
           }
@@ -289,19 +230,10 @@
 
   start.onclick = async () => {
     start.disabled = true;
-    // Контекст создаём здесь — в пределах жеста пользователя. Если WebKit
-    // его не даёт (например, Lockdown Mode), проверка звука просто пропустится.
-    let audioContext = null;
     try {
-      audioContext = new AudioContext();
-      if (audioContext.state === 'suspended') audioContext.resume().catch(() => {});
-    } catch (error) {
-      console.warn('AudioContext недоступен:', error);
-    }
-    try {
-      const request = navigator.mediaDevices.getUserMedia({video: {facingMode: 'user'}, audio: true});
+      const request = navigator.mediaDevices.getUserMedia({video: {facingMode: 'user'}, audio: false});
       const timeout = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Камера не ответила за 8 секунд')), 8000));
+        setTimeout(() => reject(new Error('Камера не ответила за 10 секунд')), 10000));
       try {
         stream = await Promise.race([request, timeout]);
       } catch (error) {
@@ -312,14 +244,12 @@
       video.srcObject = stream;
       video.hidden = false;
       livenessBtn.disabled = false;
-      const camera = await runStaticChecks();
-      const audio = await runAudioCheck(audioContext);
-      renderVerdict(camera.pass + audio.pass, camera.total + audio.total);
+      await runStaticChecks();
     } catch (e) {
       row('Получить камеру', false, String(e.message || e));
       verdict.hidden = false;
       verdict.className = 'risk-high';
-      verdict.textContent = 'Камеру получить не удалось.';
+      verdict.textContent = 'Камеру получить не удалось: ' + String(e.message || e);
     }
   };
 
