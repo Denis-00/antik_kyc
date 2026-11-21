@@ -28,7 +28,8 @@
   <h1>KYC — верификация личности</h1>
   <p>Сайт запрашивает фронтальную камеру и проверяет, что видео действительно живое и пришло с честного устройства. Модель проверок повторяет публичные сигналы Persona: отпечаток, гео/VPN-детект, liveness с позами.</p>
   <button id="start">Начать верификацию</button>
-  <button id="liveness" disabled>Активная liveness (позы Persona: влево/центр/вправо)</button>
+  <button id="liveness" disabled>Активная liveness (случайный порядок)</button>
+  <button id="livenessFixed" disabled>Активная liveness (фиксированный порядок)</button>
   <video id="video" autoplay muted playsinline hidden></video>
   <p id="command">Команда: —</p>
   <p id="motion">Движение: —</p>
@@ -43,6 +44,7 @@
 <script>
   const start = document.getElementById('start');
   const livenessBtn = document.getElementById('liveness');
+  const livenessFixedBtn = document.getElementById('livenessFixed');
   const video = document.getElementById('video');
   const checks = document.getElementById('checks');
   const command = document.getElementById('command');
@@ -147,6 +149,16 @@
     if (row('WebRTC API присутствует (как в Safari)', rtc,
         'RTCPeerConnection: ' + typeof window.RTCPeerConnection)) pass++;
 
+    total++;
+    const gum = String(navigator.mediaDevices.getUserMedia);
+    if (row('getUserMedia выглядит нативной', gum.includes('[native code]'),
+        gum.slice(0, 60) + '…')) pass++;
+
+    total++;
+    const ed = String(navigator.mediaDevices.enumerateDevices);
+    if (row('enumerateDevices выглядит нативной', ed.includes('[native code]'),
+        ed.slice(0, 60) + '…')) pass++;
+
     return {pass, total};
   }
 
@@ -229,19 +241,52 @@
     return s / a.length;
   }
 
-  function liveness() {
+  // Порог сдвига «лица» для определения стороны поворота (доля ширины кадра).
+  // Знак «влево = минус» проверь на честном прогоне: если стороны перепутаны,
+  // поменяй < и > местами в poseDirectionOk.
+  const DIRECTION_THRESHOLD = 0.03;
+
+  // Грубая оценка положения лица: центроид пикселей «кожного» цвета.
+  // Без ML и лицевых точек — эвристика, но достаточная, чтобы отличить
+  // поворот влево от поворота вправо.
+  function skinCentroid() {
+    const w = 96, h = 64;
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const g = c.getContext('2d', {willReadFrequently: true});
+    g.drawImage(video, 0, 0, w, h);
+    const d = g.getImageData(0, 0, w, h).data;
+    let sx = 0, count = 0;
+    for (let i = 0; i < d.length; i += 4) {
+      const r = d[i], gr = d[i + 1], b = d[i + 2];
+      if (r > 95 && gr > 40 && b > 20 && r > gr && r > b && (r - gr) > 15) {
+        sx += (i / 4) % w;
+        count++;
+      }
+    }
+    return count > 200 ? sx / count / w : null;
+  }
+
+  function liveness(randomOrder) {
     return new Promise(resolve => {
-      const turns = shuffle(POSES.filter(p => p.key !== 'center')).slice(0, 2);
+      const turns = randomOrder
+        ? shuffle(POSES.filter(p => p.key !== 'center')).slice(0, 2)
+        : [
+            {key: 'left',  text: 'Поверните голову ВЛЕВО'},
+            {key: 'right', text: 'Поверните голову ВПРАВО'}
+          ];
       const phases = [
         { kind: 'freeze', text: 'Смотрите прямо и НЕ ДВИГАЙТЕСЬ' },
-        { kind: 'pose',   text: turns[0].text },
+        { kind: 'pose', pose: turns[0].key, text: turns[0].text },
         { kind: 'freeze', text: 'Замрите и смотрите прямо' },
-        { kind: 'pose',   text: turns[1].text }
+        { kind: 'pose', pose: turns[1].key, text: turns[1].text }
       ];
-      const results = phases.map(p => ({ kind: p.kind, max: 0 }));
+      const results = phases.map(p => ({kind: p.kind, pose: p.pose ?? null, max: 0, shift: null}));
       let index = 0;
       let prev = null;
       let currentMax = 0;
+      let currentCentroid = null;
+      let baseline = null;
       let loopHit = false;
       const history = [];
       const startTime = performance.now();
@@ -249,6 +294,8 @@
       const tick = setInterval(() => {
         if (video.videoWidth === 0) return;
         const sig = signature();
+        const centroid = skinCentroid();
+        if (centroid !== null) currentCentroid = centroid;
         const t = performance.now() - startTime;
         if (prev) {
           currentMax = Math.max(currentMax, diff(sig, prev));
@@ -264,21 +311,36 @@
           (loopHit ? '  |  ⚠ повтор кадра (цикл) — это запись' : '');
       }, 120);
 
-      command.textContent = '1/4: ' + phases[0].text;
+      command.textContent = '1/4 (' + (randomOrder ? 'случайный' : 'фиксированный') + '): ' + phases[0].text;
 
       const step = setInterval(() => {
         results[index].max = currentMax;
         currentMax = 0;
+        if (phases[index].kind === 'freeze') {
+          baseline = currentCentroid ?? baseline;
+        } else {
+          results[index].shift = currentCentroid !== null && baseline !== null
+            ? currentCentroid - baseline : null;
+        }
+        currentCentroid = null;
         index++;
         if (index >= phases.length) {
           clearInterval(tick);
           clearInterval(step);
           const freezeOk = results.filter(r => r.kind === 'freeze').every(r => r.max < 2.5);
-          const poseOk = results.filter(r => r.kind === 'pose').every(r => r.max > 3);
-          const ok = freezeOk && poseOk && !loopHit;
-          const summary = results
-            .map(r => (r.kind === 'freeze' ? 'пауза' : 'поза') + ' ' + r.max.toFixed(1))
-            .join(' / ');
+          const poseMotionOk = results.filter(r => r.kind === 'pose').every(r => r.max > 3);
+          const poseDirectionOk = results.filter(r => r.kind === 'pose').every(r => {
+            if (r.shift === null) return true; // не измерили — не валим
+            if (r.pose === 'left') return r.shift < -DIRECTION_THRESHOLD;
+            if (r.pose === 'right') return r.shift > DIRECTION_THRESHOLD;
+            return Math.abs(r.shift) < DIRECTION_THRESHOLD;
+          });
+          const ok = freezeOk && poseMotionOk && poseDirectionOk && !loopHit;
+          const summary = results.map(r => {
+            if (r.kind === 'freeze') return 'пауза ' + r.max.toFixed(1);
+            return r.pose + ' ' + r.max.toFixed(1) +
+              (r.shift !== null ? '(' + (r.shift > 0 ? '+' : '') + r.shift.toFixed(2) + ')' : '');
+          }).join(' / ');
           command.textContent = 'Итог: ' + summary +
             (loopHit ? '  |  ⚠ цикл' : '') +
             ' — ' + (ok ? 'выполнено' : 'НЕ выполнено / запись');
@@ -313,6 +375,7 @@
       video.srcObject = stream;
       video.hidden = false;
       livenessBtn.disabled = false;
+      livenessFixedBtn.disabled = false;
       const camera = await runStaticChecks();
       const audio = await runAudioCheck(audioContext);
       renderVerdict(camera.pass + audio.pass, camera.total + audio.total);
@@ -326,7 +389,12 @@
 
   livenessBtn.onclick = async () => {
     livenessBtn.disabled = true;
-    await liveness();
+    await liveness(true);
+  };
+
+  livenessFixedBtn.onclick = async () => {
+    livenessFixedBtn.disabled = true;
+    await liveness(false);
   };
 
   window.addEventListener('pagehide', () => { stream?.getTracks().forEach(t => t.stop()); });
