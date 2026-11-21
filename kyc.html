@@ -91,6 +91,12 @@
     if (row('deviceId есть в enumerateDevices', inList, 'трек: ' + (s.deviceId || '—') + '\nсписок: ' + JSON.stringify(ids))) pass++;
 
     total++;
+    const videos = devices.filter(d => d.kind === 'videoinput').length;
+    const audios = devices.filter(d => d.kind === 'audioinput').length;
+    if (row('Список камер реалистичен (≥2 видео + ≥1 аудио)', videos >= 2 && audios >= 1,
+        'видео: ' + videos + ', аудио: ' + audios)) pass++;
+
+    total++;
     let geo = null;
     try {
       geo = await new Promise((res, rej) =>
@@ -101,6 +107,14 @@
       if (row('Геолокация доступна', true, c.latitude.toFixed(4) + ', ' + c.longitude.toFixed(4))) pass++;
     } else {
       row('Геолокация доступна', false, 'отказано / нет данных');
+    }
+
+    total++;
+    if (geo && typeof GeolocationPosition !== 'undefined') {
+      if (row('Тип GeolocationPosition', geo instanceof GeolocationPosition,
+          'instanceof: ' + (geo instanceof GeolocationPosition))) pass++;
+    } else {
+      row('Тип GeolocationPosition', false, 'гео недоступна или тип неизвестен');
     }
 
     total++;
@@ -126,6 +140,12 @@
     const hostingHit = !!(ip?.org && hosting.test(ip.org));
     if (row('IP не похож на датацентр/VPN (эвристика)', !hostingHit,
         'org: ' + (ip?.org ?? 'нет данных'))) pass++;
+
+    total++;
+    const rtc = typeof window.RTCPeerConnection === 'function' ||
+      typeof window.webkitRTCPeerConnection === 'function';
+    if (row('WebRTC API присутствует (как в Safari)', rtc,
+        'RTCPeerConnection: ' + typeof window.RTCPeerConnection)) pass++;
 
     return {pass, total};
   }
@@ -170,7 +190,7 @@
       const db = 20 * Math.log10(peak || 1e-9);
       const ok = peak > 1e-4;
       if (row('Звук: не цифровая тишина', ok,
-          'уровень ' + db.toFixed(0) + ' дБ, RMS ' + peak.toExponential(2))) pass++;
+          'уровень ' + db.toFixed(0) + ' дБ, RMS ' + peak.toExponential(2) + ', ctx=' + context.state)) pass++;
     } catch (error) {
       row('Звук: не цифровая тишина', false, String(error.message || error));
     }
