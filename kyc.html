@@ -127,12 +127,54 @@
     if (row('IP не похож на датацентр/VPN (эвристика)', !hostingHit,
         'org: ' + (ip?.org ?? 'нет данных'))) pass++;
 
+    return {pass, total};
+  }
+
+  function renderVerdict(pass, total) {
     const risk = total - pass;
     verdict.hidden = false;
     verdict.className = risk === 0 ? 'risk-low' : 'risk-high';
     verdict.textContent = risk === 0
       ? `Верификация пройдена: ${pass}/${total} проверок чисто.`
       : `Подозрение: ${risk} из ${total} проверок не прошли.`;
+  }
+
+  async function runAudioCheck(context) {
+    let pass = 0, total = 0;
+    total++;
+    const audio = stream ? stream.getAudioTracks()[0] : null;
+    if (!audio) {
+      row('Звук с микрофона', false, 'аудиодорожки нет');
+      return {pass, total};
+    }
+    if (!context) {
+      row('Звук с микрофона', false, 'AudioContext недоступен в этом браузере');
+      return {pass, total};
+    }
+    try {
+      if (context.state === 'suspended') await context.resume();
+      const source = context.createMediaStreamSource(new MediaStream([audio]));
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 2048;
+      source.connect(analyser);
+      const buffer = new Float32Array(analyser.fftSize);
+      let peak = 0;
+      for (let i = 0; i < 12; i++) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        analyser.getFloatTimeDomainData(buffer);
+        let sum = 0;
+        for (const value of buffer) sum += value * value;
+        peak = Math.max(peak, Math.sqrt(sum / buffer.length));
+      }
+      source.disconnect();
+      const db = 20 * Math.log10(peak || 1e-9);
+      const ok = peak > 1e-4;
+      if (row('Звук: не цифровая тишина', ok,
+          'уровень ' + db.toFixed(0) + ' дБ, RMS ' + peak.toExponential(2))) pass++;
+    } catch (error) {
+      row('Звук: не цифровая тишина', false, String(error.message || error));
+    }
+    return {pass, total};
   }
 
   const POSES = [
@@ -230,8 +272,15 @@
 
   start.onclick = async () => {
     start.disabled = true;
+    let audioContext = null;
     try {
-      const request = navigator.mediaDevices.getUserMedia({video: {facingMode: 'user'}, audio: false});
+      audioContext = new AudioContext();
+      if (audioContext.state === 'suspended') audioContext.resume().catch(() => {});
+    } catch (error) {
+      console.warn('AudioContext недоступен:', error);
+    }
+    try {
+      const request = navigator.mediaDevices.getUserMedia({video: {facingMode: 'user'}, audio: true});
       const timeout = new Promise((_, reject) =>
         setTimeout(() => reject(new Error('Камера не ответила за 10 секунд')), 10000));
       try {
@@ -244,7 +293,9 @@
       video.srcObject = stream;
       video.hidden = false;
       livenessBtn.disabled = false;
-      await runStaticChecks();
+      const camera = await runStaticChecks();
+      const audio = await runAudioCheck(audioContext);
+      renderVerdict(camera.pass + audio.pass, camera.total + audio.total);
     } catch (e) {
       row('Получить камеру', false, String(e.message || e));
       verdict.hidden = false;
