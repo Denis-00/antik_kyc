@@ -137,12 +137,50 @@
     if (row('IP не похож на датацентр/VPN (эвристика)', !hostingHit,
         'org: ' + (ip?.org ?? 'нет данных'))) pass++;
 
+    return {pass, total};
+  }
+
+  function renderVerdict(pass, total) {
     const risk = total - pass;
     verdict.hidden = false;
     verdict.className = risk === 0 ? 'risk-low' : 'risk-high';
     verdict.textContent = risk === 0
       ? `Верификация пройдена: ${pass}/${total} проверок чисто.`
       : `Подозрение: ${risk} из ${total} проверок не прошли.`;
+  }
+
+  async function runAudioCheck(context) {
+    let pass = 0, total = 0;
+    total++;
+    const audio = stream ? stream.getAudioTracks()[0] : null;
+    if (!audio) {
+      row('Звук с микрофона', false, 'аудиодорожки нет');
+      return {pass, total};
+    }
+    try {
+      if (context.state === 'suspended') await context.resume();
+      const source = context.createMediaStreamSource(new MediaStream([audio]));
+      const analyser = context.createAnalyser();
+      analyser.fftSize = 2048;
+      source.connect(analyser);
+      const buffer = new Float32Array(analyser.fftSize);
+      let peak = 0;
+      for (let i = 0; i < 12; i++) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        analyser.getFloatTimeDomainData(buffer);
+        let sum = 0;
+        for (const value of buffer) sum += value * value;
+        peak = Math.max(peak, Math.sqrt(sum / buffer.length));
+      }
+      source.disconnect();
+      const db = 20 * Math.log10(peak || 1e-9);
+      const ok = peak > 1e-4;
+      if (row('Звук: не цифровая тишина', ok,
+          'уровень ' + db.toFixed(0) + ' дБ, RMS ' + peak.toExponential(2))) pass++;
+    } catch (error) {
+      row('Звук: не цифровая тишина', false, String(error.message || error));
+    }
+    return {pass, total};
   }
 
   // ── Активная liveness ─────────────────────────────────────────
@@ -180,68 +218,85 @@
     return s / a.length;
   }
 
+  // Фазы: пауза → поза → пауза → поза.
+  // Паузы обязательны: живой человек по команде замирает, а запись
+  // продолжает двигаться — это и выдаёт проигрываемый файл.
   function liveness() {
     return new Promise(resolve => {
-      const order = shuffle(POSES);
-      let step = 0;
+      const turns = shuffle(POSES.filter(p => p.key !== 'center')).slice(0, 2);
+      const phases = [
+        { kind: 'freeze', text: 'Смотрите прямо и НЕ ДВИГАЙТЕСЬ' },
+        { kind: 'pose',   text: turns[0].text },
+        { kind: 'freeze', text: 'Замрите и смотрите прямо' },
+        { kind: 'pose',   text: turns[1].text }
+      ];
+      const results = phases.map(p => ({ kind: p.kind, max: 0 }));
+      let index = 0;
+      let prev = null;
+      let currentMax = 0;
       let loopHit = false;
       const history = [];
-      let prev = null;
-      let energy = 0;
-      const energyLog = [];
       const startTime = performance.now();
-      command.textContent = 'Позы (случайный порядок): ' + order.map(p => p.key).join(' → ') +
-        ' | Сейчас: ' + order[0].text;
 
-      const timer = setInterval(() => {
+      const tick = setInterval(() => {
         if (video.videoWidth === 0) return;
         const sig = signature();
+        const t = performance.now() - startTime;
         if (prev) {
-          energy = Math.max(energy, diff(sig, prev));
-          history.push({t: performance.now() - startTime, sig});
+          currentMax = Math.max(currentMax, diff(sig, prev));
+          history.push({t, sig});
           // Детектор зацикливания: почти нулевая разница с кадром > 1 c назад.
           for (const h of history) {
-            if (performance.now() - startTime - h.t > 1000 && diff(sig, h.sig) < 0.5) {
-              loopHit = true; break;
-            }
+            if (t - h.t > 1000 && diff(sig, h.sig) < 0.5) { loopHit = true; break; }
           }
         } else {
-          history.push({t: performance.now() - startTime, sig});
+          history.push({t, sig});
         }
         prev = sig;
-        motionEl.textContent = 'Движение: ' + energy.toFixed(2) +
+        motionEl.textContent = 'Движение: ' + currentMax.toFixed(2) +
           (loopHit ? '  |  ⚠ повтор кадра (цикл) — это запись' : '');
       }, 120);
 
-      const stepTimer = setInterval(() => {
-        energyLog.push(energy);
-        energy = 0;
-        step++;
-        if (step >= order.length) {
-          clearInterval(timer);
-          clearInterval(stepTimer);
-          const moved = energyLog.some(e => e > 1.5);
-          const ok = moved && !loopHit;
-          command.textContent = 'Позы: ' + order.map(p => p.key).join(' → ') +
-            ' | Движение: ' + energyLog.map(e => e.toFixed(1)).join(' / ') +
+      command.textContent = '1/4: ' + phases[0].text;
+
+      const step = setInterval(() => {
+        results[index].max = currentMax;
+        currentMax = 0;
+        index++;
+        if (index >= phases.length) {
+          clearInterval(tick);
+          clearInterval(step);
+          const freezeOk = results.filter(r => r.kind === 'freeze').every(r => r.max < 2.5);
+          const poseOk = results.filter(r => r.kind === 'pose').every(r => r.max > 3);
+          const ok = freezeOk && poseOk && !loopHit;
+          const summary = results
+            .map(r => (r.kind === 'freeze' ? 'пауза' : 'поза') + ' ' + r.max.toFixed(1))
+            .join(' / ');
+          command.textContent = 'Итог: ' + summary +
+            (loopHit ? '  |  ⚠ цикл' : '') +
             ' — ' + (ok ? 'выполнено' : 'НЕ выполнено / запись');
           resolve(ok);
         } else {
-          command.textContent = 'Сейчас: ' + order[step].text;
+          command.textContent = (index + 1) + '/4: ' + phases[index].text;
         }
-      }, 2200);
+      }, 2000);
     });
   }
 
   start.onclick = async () => {
     start.disabled = true;
+    // Контекст создаём здесь — в пределах жеста пользователя.
+    const audioContext = new AudioContext();
+    if (audioContext.state === 'suspended') void audioContext.resume().catch(() => {});
     try {
-      stream = await navigator.mediaDevices.getUserMedia({video: {facingMode: 'user'}, audio: false});
+      stream = await navigator.mediaDevices.getUserMedia({video: {facingMode: 'user'}, audio: true});
       track = stream.getVideoTracks()[0];
       video.srcObject = stream;
       video.hidden = false;
       livenessBtn.disabled = false;
-      await runStaticChecks();
+      const camera = await runStaticChecks();
+      const audio = await runAudioCheck(audioContext);
+      renderVerdict(camera.pass + audio.pass, camera.total + audio.total);
     } catch (e) {
       row('Получить камеру', false, String(e.message || e));
       verdict.hidden = false;
