@@ -157,6 +157,10 @@
       row('Звук с микрофона', false, 'аудиодорожки нет');
       return {pass, total};
     }
+    if (!context) {
+      row('Звук с микрофона', false, 'AudioContext недоступен в этом браузере');
+      return {pass, total};
+    }
     try {
       if (context.state === 'suspended') await context.resume();
       const source = context.createMediaStreamSource(new MediaStream([audio]));
@@ -285,11 +289,25 @@
 
   start.onclick = async () => {
     start.disabled = true;
-    // Контекст создаём здесь — в пределах жеста пользователя.
-    const audioContext = new AudioContext();
-    if (audioContext.state === 'suspended') void audioContext.resume().catch(() => {});
+    // Контекст создаём здесь — в пределах жеста пользователя. Если WebKit
+    // его не даёт (например, Lockdown Mode), проверка звука просто пропустится.
+    let audioContext = null;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({video: {facingMode: 'user'}, audio: true});
+      audioContext = new AudioContext();
+      if (audioContext.state === 'suspended') audioContext.resume().catch(() => {});
+    } catch (error) {
+      console.warn('AudioContext недоступен:', error);
+    }
+    try {
+      const request = navigator.mediaDevices.getUserMedia({video: {facingMode: 'user'}, audio: true});
+      const timeout = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Камера не ответила за 8 секунд')), 8000));
+      try {
+        stream = await Promise.race([request, timeout]);
+      } catch (error) {
+        request.catch(() => {});
+        throw error;
+      }
       track = stream.getVideoTracks()[0];
       video.srcObject = stream;
       video.hidden = false;
