@@ -656,8 +656,10 @@
       clearTimeout(docTimer);
       // Настоящий KYC снимает кадр через canvas → toDataURL/toBlob
       // и показывает его на подтверждение («Use this photo / Retake»).
+      // Размер берём из видео, чтобы не сплющивать кадр.
       const shot = document.createElement('canvas');
-      shot.width = 640; shot.height = 480;
+      shot.width = docVideo.videoWidth || 640;
+      shot.height = docVideo.videoHeight || 480;
       shot.getContext('2d').drawImage(docVideo, 0, 0, shot.width, shot.height);
       docShotData = shot.toDataURL('image/jpeg', 0.85);
       docShotSig = docSignature(frame);
