@@ -11,11 +11,22 @@
   button { font: inherit; padding: 9px 14px; margin: 4px 6px 4px 0; }
   video { display: block; width: 100%; max-height: 46vh; background: #111; margin: 14px 0; }
   video[hidden] { display: none; }
-  #docPreview { position: relative; margin: 14px 0; background: #111; border-radius: 10px; overflow: hidden; }
-  #docPreview video { margin: 0; max-height: 46vh; object-fit: cover; }
+  #docStage { margin: 10px 0; }
+  #docPreview { position: relative; margin: 14px 0; background: #111; border-radius: 12px; overflow: hidden; border: 2px solid #eee; }
+  #docPreview video { display: block; width: 100%; max-height: 46vh; object-fit: cover; margin: 0; }
   #docGuide { position: absolute; inset: 12% 8%; border: 2px dashed #6cf; border-radius: 8px; pointer-events: none; }
-  #docReview { margin: 14px 0; }
-  #docReview img { display: block; width: 100%; max-height: 40vh; object-fit: contain; background: #111; border-radius: 10px; }
+  #docBanner { text-align: center; font-size: .9rem; color: #bbb; margin-top: 8px; }
+  #docLabel { background: #d9d9d9; color: #222; padding: 10px 14px; border-radius: 0 0 12px 12px; margin-top: -2px; font-weight: 600; }
+  #docStatus { font-family: ui-monospace, Menlo, monospace; font-size: .9rem; min-height: 1.2em; }
+  .docControls { display: flex; align-items: center; justify-content: space-between; margin: 12px 0 4px; }
+  .shutter { width: 66px; height: 66px; border-radius: 50%; border: 3px solid #eee; background: #fff; }
+  .shutter:disabled { background: #3a3a3a; border-color: #666; }
+  .ghost { background: transparent; border: 1px solid #8888; border-radius: 10px; }
+  .primary { background: #111; color: #fff; border: none; border-radius: 10px; padding: 12px 16px; width: 100%; }
+  .docCard { border: 2px dashed #bbb; border-radius: 12px; padding: 36px; text-align: center; font-size: 2rem; color: #999; margin: 12px 0; }
+  #docReviewScreen img { display: block; width: 100%; max-height: 40vh; object-fit: contain; background: #111; border-radius: 12px; }
+  #docReviewLabel { background: #d9d9d9; color: #222; padding: 10px 14px; border-radius: 0 0 12px 12px; font-weight: 600; margin-bottom: 10px; }
+  #docProcessing { padding: 28px; text-align: center; font-weight: 700; }
   table { border-collapse: collapse; width: 100%; margin: 14px 0; }
   th, td { border: 1px solid #8884; padding: 7px 9px; text-align: left; vertical-align: top; }
   td:first-child { white-space: nowrap; }
@@ -33,20 +44,48 @@
   <h1>KYC — верификация личности</h1>
   <p>Сайт запрашивает фронтальную камеру и проверяет, что видео действительно живое и пришло с честного устройства. Модель проверок повторяет публичные сигналы Persona: отпечаток, гео/VPN-детект, liveness с позами.</p>
 
-  <h2>Этап 1 — документ</h2>
-  <p id="docHint">Шаг 1 из 2: лицевая сторона документа.</p>
-  <div id="docPreview" hidden>
-    <video id="docVideo" autoplay muted playsinline></video>
-    <div id="docGuide"></div>
-  </div>
-  <button id="docStart">Открыть камеру для документа</button>
-  <button id="docCapture" disabled>Сфотографировать</button>
-  <div id="docReview" hidden>
-    <img id="docReviewImage" alt="Фото документа" />
-    <button id="docUse">Использовать фото</button>
-    <button id="docRetake">Переснять</button>
-  </div>
-  <p id="docStatus"></p>
+  <section id="docStage">
+    <div id="docIntro">
+      <h2>Верификация с камерой</h2>
+      <p>Мы сделаем фото документа и короткое видео. Это подтвердит личность.</p>
+      <button id="docBegin" class="primary">Продолжить</button>
+    </div>
+
+    <div id="docPrompt" hidden>
+      <h2>Документ</h2>
+      <p id="docPromptText">Сделайте чёткое фото лицевой стороны документа.</p>
+      <div class="docCard">▣</div>
+      <button id="docOpenCamera" class="primary">Открыть камеру</button>
+    </div>
+
+    <div id="docCamera" hidden>
+      <div id="docBanner">Автозахват включён</div>
+      <div id="docPreview">
+        <video id="docVideo" autoplay muted playsinline></video>
+        <div id="docGuide"></div>
+      </div>
+      <div id="docLabel">Лицевая сторона</div>
+      <p id="docStatus">Наведите документ в рамку</p>
+      <div class="docControls">
+        <button id="docTips" class="ghost" type="button">ⓘ Подсказки</button>
+        <button id="docShutter" class="shutter" disabled aria-label="Сфотографировать"></button>
+        <button id="docFlash" class="ghost" type="button" disabled>⚡</button>
+      </div>
+    </div>
+
+    <div id="docReviewScreen" hidden>
+      <p>Убедитесь, что свет хороший и надписи читаемы.</p>
+      <img id="docReviewImage" alt="Фото документа" />
+      <div id="docReviewLabel">Лицевая сторона</div>
+      <p id="docReviewStatus"></p>
+      <button id="docUse" class="primary">Использовать фото</button>
+      <button id="docRetake" class="ghost">Переснять</button>
+    </div>
+
+    <div id="docProcessing" hidden>
+      <p>Проверяем документ…</p>
+    </div>
+  </section>
 
   <h2>Этап 2 — видео</h2>
   <button id="start" disabled>Начать верификацию</button>
@@ -437,29 +476,46 @@
   const GLARE_THRESHOLD = 0.04;  // доля пересвеченных пикселей
   const STABLE_TICKS = 3;        // 3×200 мс стабильности перед авто-захватом
 
-  const docStart = document.getElementById('docStart');
-  const docCapture = document.getElementById('docCapture');
+  const docIntro = document.getElementById('docIntro');
+  const docPrompt = document.getElementById('docPrompt');
+  const docPromptText = document.getElementById('docPromptText');
+  const docCamera = document.getElementById('docCamera');
+  const docReviewScreen = document.getElementById('docReviewScreen');
+  const docProcessing = document.getElementById('docProcessing');
+  const docLabel = document.getElementById('docLabel');
+  const docReviewLabel = document.getElementById('docReviewLabel');
+  const docBegin = document.getElementById('docBegin');
+  const docOpenCamera = document.getElementById('docOpenCamera');
+  const docShutter = document.getElementById('docShutter');
+  const docTips = document.getElementById('docTips');
+  const docUse = document.getElementById('docUse');
+  const docRetake = document.getElementById('docRetake');
   const docPreview = document.getElementById('docPreview');
   const docVideo = document.getElementById('docVideo');
   const docStatus = document.getElementById('docStatus');
-  const docHint = document.getElementById('docHint');
-  const docReview = document.getElementById('docReview');
+  const docReviewStatus = document.getElementById('docReviewStatus');
   const docReviewImage = document.getElementById('docReviewImage');
-  const docUse = document.getElementById('docUse');
-  const docRetake = document.getElementById('docRetake');
+
+  const DOC_SCREENS = [docIntro, docPrompt, docCamera, docReviewScreen, docProcessing];
+  function showDocScreen(screen) {
+    for (const element of DOC_SCREENS) element.hidden = element !== screen;
+  }
 
   let docStream = null;
   let docSide = 0;
   let docShots = [];
   let docEnergy = 0;
   let docTimer = null;
-  let docManualAfter = null;
   let docMeter = null;
   let docPrev = null;
   let docStable = 0;
   let docCapturing = false;
   let docLastFrame = null;
   let docLastMetrics = null;
+  let docShotData = null;
+  let docShotSig = null;
+  let docShotMetrics = null;
+  let docProcessingTimer = null;
 
   function docFrame() {
     const w = 96, h = 64;
@@ -527,24 +583,25 @@
 
   function stopDocCamera() {
     clearTimeout(docTimer);
-    clearTimeout(docManualAfter);
+    clearTimeout(docProcessingTimer);
     clearInterval(docMeter);
     docTimer = null;
     docMeter = null;
     if (docStream) docStream.getTracks().forEach(t => t.stop());
     docStream = null;
     docVideo.srcObject = null;
-    docPreview.hidden = true;
-    docCapture.disabled = true;
+    docShutter.disabled = true;
   }
 
   async function openDocCamera() {
-    docStart.disabled = true;
+    docOpenCamera.disabled = true;
+    showDocScreen(docCamera);
+    docLabel.textContent = docSide === 0 ? 'Лицевая сторона' : 'Оборотная сторона';
+    docStatus.textContent = 'Загрузка камеры…';
+    docShutter.disabled = true;
     try {
       docStream = await navigator.mediaDevices.getUserMedia({video: {facingMode: 'environment'}, audio: false});
       docVideo.srcObject = docStream;
-      docPreview.hidden = false;
-      docCapture.disabled = true;
       docPrev = null;
       docEnergy = 0;
       docStable = 0;
@@ -562,7 +619,7 @@
           docEnergy = Math.max(docEnergy, d);
           const detected = metrics.edgeDensity >= SHUTTER_EDGE;
           // Как у Persona: затвор доступен, только когда в кадре «документ».
-          docCapture.disabled = !detected;
+          docShutter.disabled = !detected;
           if (detected) {
             docStable = metrics.edgeDensity >= EDGE_THRESHOLD && d < 2.0 ? docStable + 1 : 0;
             docStatus.textContent = (metrics.edgeDensity >= EDGE_THRESHOLD
@@ -578,16 +635,12 @@
         }
         docPrev = sig;
       }, 200);
-      docHint.textContent = 'Держите документ в рамке';
     } catch (error) {
       docStatus.textContent = 'Камера документа недоступна: ' + (error.message || error);
-      docStart.disabled = false;
+    } finally {
+      docOpenCamera.disabled = false;
     }
   }
-
-  let docShotData = null;
-  let docShotSig = null;
-  let docShotMetrics = null;
 
   function takeDocPhoto() {
     if (!docStream || docCapturing) return;
@@ -618,14 +671,12 @@
 
   function showReview() {
     docReviewImage.src = docShotData;
-    docReview.hidden = false;
-    docStatus.textContent = docSide === 0
-      ? 'Проверьте фото лицевой стороны'
-      : 'Проверьте фото оборота';
+    docReviewLabel.textContent = docSide === 0 ? 'Лицевая сторона' : 'Оборотная сторона';
+    docReviewStatus.textContent = '';
+    showDocScreen(docReviewScreen);
   }
 
   function retakeShot() {
-    docReview.hidden = true;
     docShotData = null;
     docShotSig = null;
     docShotMetrics = null;
@@ -636,30 +687,28 @@
     const m = docShotMetrics;
     if (!m || !docShotSig) return;
     if (m.edgeDensity < ACCEPT_EDGE) {
-      docStatus.textContent = 'Это не похоже на документ — переснимите';
+      docReviewStatus.textContent = 'Это не похоже на документ — переснимите';
       return;
     }
     if (m.variance < BLUR_THRESHOLD) {
-      docStatus.textContent = 'Фото размыто — переснимите';
+      docReviewStatus.textContent = 'Фото размыто — переснимите';
       return;
     }
     if (m.glareFraction > GLARE_THRESHOLD) {
-      docStatus.textContent = 'Блик — уберите свет и переснимите';
+      docReviewStatus.textContent = 'Блик — уберите свет и переснимите';
       return;
     }
-    docReview.hidden = true;
     docShots.push(docShotSig);
     docShotData = null;
     docShotSig = null;
     docShotMetrics = null;
     if (docSide === 0) {
       docSide = 1;
-      docStatus.textContent = 'Лицевая сторона принята. Переверните документ.';
-      docStart.disabled = false;
-      docStart.textContent = 'Снять оборот документа';
+      docPromptText.textContent = 'Теперь сфотографируйте оборотную сторону документа.';
+      showDocScreen(docPrompt);
     } else {
-      docStart.disabled = true;
-      finishDocument();
+      showDocScreen(docProcessing);
+      docProcessingTimer = setTimeout(finishDocument, 1500);
     }
   }
 
@@ -681,14 +730,24 @@
     if (row('Документ: живая съёмка (кадры меняются)', liveOk,
         'движение: ' + docEnergy.toFixed(2))) pass++;
     const ok = pass === total;
-    docStatus.textContent = ok
-      ? 'Документ принят — переходите к видео'
-      : 'Документ не принят (похоже на статичное фото)';
+    const result = docProcessing.querySelector('p');
+    if (result) {
+      result.textContent = ok
+        ? 'Документ принят. Можно перейти к видео.'
+        : 'Документ не принят — похоже на статичное фото.';
+    }
     if (ok) start.disabled = false;
   }
 
-  docStart.onclick = openDocCamera;
-  docCapture.onclick = takeDocPhoto;
+  docBegin.onclick = () => {
+    docPromptText.textContent = 'Сделайте чёткое фото лицевой стороны документа.';
+    showDocScreen(docPrompt);
+  };
+  docOpenCamera.onclick = openDocCamera;
+  docShutter.onclick = takeDocPhoto;
+  docTips.onclick = () => {
+    docStatus.textContent = 'Свет ровный, без бликов; документ целиком в рамке.';
+  };
   docUse.onclick = acceptShot;
   docRetake.onclick = retakeShot;
 
