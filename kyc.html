@@ -11,6 +11,9 @@
   button { font: inherit; padding: 9px 14px; margin: 4px 6px 4px 0; }
   video { display: block; width: 100%; max-height: 46vh; background: #111; margin: 14px 0; }
   video[hidden] { display: none; }
+  #docPreview { position: relative; margin: 14px 0; background: #111; border-radius: 10px; overflow: hidden; }
+  #docPreview video { margin: 0; max-height: 46vh; object-fit: cover; }
+  #docGuide { position: absolute; inset: 12% 8%; border: 2px dashed #6cf; border-radius: 8px; pointer-events: none; }
   table { border-collapse: collapse; width: 100%; margin: 14px 0; }
   th, td { border: 1px solid #8884; padding: 7px 9px; text-align: left; vertical-align: top; }
   td:first-child { white-space: nowrap; }
@@ -27,7 +30,19 @@
 <body>
   <h1>KYC — верификация личности</h1>
   <p>Сайт запрашивает фронтальную камеру и проверяет, что видео действительно живое и пришло с честного устройства. Модель проверок повторяет публичные сигналы Persona: отпечаток, гео/VPN-детект, liveness с позами.</p>
-  <button id="start">Начать верификацию</button>
+
+  <h2>Этап 1 — документ</h2>
+  <p id="docHint">Шаг 1 из 2: лицевая сторона документа.</p>
+  <div id="docPreview" hidden>
+    <video id="docVideo" autoplay muted playsinline></video>
+    <div id="docGuide"></div>
+  </div>
+  <button id="docStart">Открыть камеру для документа</button>
+  <button id="docCapture" disabled>Сфотографировать</button>
+  <p id="docStatus"></p>
+
+  <h2>Этап 2 — видео</h2>
+  <button id="start" disabled>Начать верификацию</button>
   <button id="liveness" disabled>Активная liveness (случайный порядок)</button>
   <button id="livenessFixed" disabled>Активная liveness (фиксированный порядок)</button>
   <video id="video" autoplay muted playsinline hidden></video>
@@ -267,6 +282,12 @@
     return count > 200 ? sx / count / w : null;
   }
 
+  function median(values) {
+    if (!values.length) return 0;
+    const sorted = values.slice().sort((a, b) => a - b);
+    return sorted[Math.floor(sorted.length / 2)];
+  }
+
   function liveness(randomOrder) {
     return new Promise(resolve => {
       const turns = randomOrder
@@ -281,11 +302,11 @@
         { kind: 'freeze', text: 'Замрите и смотрите прямо' },
         { kind: 'pose', pose: turns[1].key, text: turns[1].text }
       ];
-      const results = phases.map(p => ({kind: p.kind, pose: p.pose ?? null, max: 0, shift: null}));
+      const results = phases.map(p => ({kind: p.kind, pose: p.pose ?? null, motion: 0, shift: null}));
       let index = 0;
       let prev = null;
-      let currentMax = 0;
-      let currentCentroid = null;
+      let phaseMotions = [];
+      let centroids = [];
       let baseline = null;
       let loopHit = false;
       const history = [];
@@ -295,50 +316,53 @@
         if (video.videoWidth === 0) return;
         const sig = signature();
         const centroid = skinCentroid();
-        if (centroid !== null) currentCentroid = centroid;
+        if (centroid !== null) centroids.push(centroid);
         const t = performance.now() - startTime;
         if (prev) {
-          currentMax = Math.max(currentMax, diff(sig, prev));
+          phaseMotions.push(diff(sig, prev));
           history.push({t, sig});
+          // Порог очень мал: у настоящей камеры «замерший» кадр отличается
+          // на шум, у зацикленной записи разница почти нулевая.
           for (const h of history) {
-            if (t - h.t > 1000 && diff(sig, h.sig) < 0.5) { loopHit = true; break; }
+            if (t - h.t > 1000 && diff(sig, h.sig) < 0.15) { loopHit = true; break; }
           }
         } else {
           history.push({t, sig});
         }
         prev = sig;
-        motionEl.textContent = 'Движение: ' + currentMax.toFixed(2) +
+        motionEl.textContent = 'Движение: ' + median(phaseMotions).toFixed(2) +
           (loopHit ? '  |  ⚠ повтор кадра (цикл) — это запись' : '');
       }, 120);
 
       command.textContent = '1/4 (' + (randomOrder ? 'случайный' : 'фиксированный') + '): ' + phases[0].text;
 
       const step = setInterval(() => {
-        results[index].max = currentMax;
-        currentMax = 0;
-        if (phases[index].kind === 'freeze') {
-          baseline = currentCentroid ?? baseline;
+        const phase = phases[index];
+        // Паузу оцениваем медианой (моргание не валит), позу — максимумом.
+        results[index].motion = phase.kind === 'freeze'
+          ? median(phaseMotions)
+          : (phaseMotions.length ? Math.max(...phaseMotions) : 0);
+        const centroid = centroids.length ? median(centroids) : null;
+        if (phase.kind === 'freeze') {
+          baseline = centroid ?? baseline;
         } else {
-          results[index].shift = currentCentroid !== null && baseline !== null
-            ? currentCentroid - baseline : null;
+          results[index].shift = centroid !== null && baseline !== null
+            ? centroid - baseline : null;
         }
-        currentCentroid = null;
+        phaseMotions = [];
+        centroids = [];
         index++;
         if (index >= phases.length) {
           clearInterval(tick);
           clearInterval(step);
-          const freezeOk = results.filter(r => r.kind === 'freeze').every(r => r.max < 2.5);
-          const poseMotionOk = results.filter(r => r.kind === 'pose').every(r => r.max > 3);
-          const poseDirectionOk = results.filter(r => r.kind === 'pose').every(r => {
-            if (r.shift === null) return true; // не измерили — не валим
-            if (r.pose === 'left') return r.shift < -DIRECTION_THRESHOLD;
-            if (r.pose === 'right') return r.shift > DIRECTION_THRESHOLD;
-            return Math.abs(r.shift) < DIRECTION_THRESHOLD;
-          });
-          const ok = freezeOk && poseMotionOk && poseDirectionOk && !loopHit;
+          const freezeOk = results.filter(r => r.kind === 'freeze').every(r => r.motion < 2.5);
+          const poseMotionOk = results.filter(r => r.kind === 'pose').every(r => r.motion > 3);
+          // Направление показываем в итоге, но в вердикт не засчитываем:
+          // фронталка бывает зеркальной, и знак сдвига зависит от устройства.
+          const ok = freezeOk && poseMotionOk && !loopHit;
           const summary = results.map(r => {
-            if (r.kind === 'freeze') return 'пауза ' + r.max.toFixed(1);
-            return r.pose + ' ' + r.max.toFixed(1) +
+            if (r.kind === 'freeze') return 'пауза ' + r.motion.toFixed(1);
+            return r.pose + ' ' + r.motion.toFixed(1) +
               (r.shift !== null ? '(' + (r.shift > 0 ? '+' : '') + r.shift.toFixed(2) + ')' : '');
           }).join(' / ');
           command.textContent = 'Итог: ' + summary +
@@ -397,7 +421,128 @@
     await liveness(false);
   };
 
-  window.addEventListener('pagehide', () => { stream?.getTracks().forEach(t => t.stop()); });
+  // ── Этап 1: документ (две стороны + «живая съёмка») ────────────
+  const docStart = document.getElementById('docStart');
+  const docCapture = document.getElementById('docCapture');
+  const docPreview = document.getElementById('docPreview');
+  const docVideo = document.getElementById('docVideo');
+  const docStatus = document.getElementById('docStatus');
+  const docHint = document.getElementById('docHint');
+
+  let docStream = null;
+  let docSide = 0;
+  let docShots = [];
+  let docEnergy = 0;
+  let docTimer = null;
+  let docMeter = null;
+  let docPrev = null;
+
+  function docSignature() {
+    const c = document.createElement('canvas');
+    c.width = 64; c.height = 48;
+    const g = c.getContext('2d', {willReadFrequently: true});
+    g.drawImage(docVideo, 0, 0, 64, 48);
+    const d = g.getImageData(0, 0, 64, 48).data;
+    const sig = new Uint8Array(64 * 48);
+    for (let i = 0, j = 0; i < d.length; i += 4, j++) sig[j] = d[i];
+    return sig;
+  }
+
+  function docDiff(a, b) {
+    let s = 0;
+    for (let i = 0; i < a.length; i++) s += Math.abs(a[i] - b[i]);
+    return s / a.length;
+  }
+
+  function docBright(sig) {
+    let n = 0;
+    for (const v of sig) if (v > 12) n++;
+    return n;
+  }
+
+  function stopDocCamera() {
+    clearTimeout(docTimer);
+    clearInterval(docMeter);
+    docTimer = null;
+    docMeter = null;
+    if (docStream) docStream.getTracks().forEach(t => t.stop());
+    docStream = null;
+    docVideo.srcObject = null;
+    docPreview.hidden = true;
+    docCapture.disabled = true;
+  }
+
+  async function openDocCamera() {
+    docStart.disabled = true;
+    try {
+      docStream = await navigator.mediaDevices.getUserMedia({video: {facingMode: 'environment'}, audio: false});
+      docVideo.srcObject = docStream;
+      docPreview.hidden = false;
+      docCapture.disabled = false;
+      docPrev = null;
+      docEnergy = 0;
+      docMeter = setInterval(() => {
+        if (!docStream || docVideo.videoWidth === 0) return;
+        const sig = docSignature();
+        if (docPrev) docEnergy = Math.max(docEnergy, docDiff(docPrev, sig));
+        docPrev = sig;
+      }, 200);
+      // Имитация авто-захвата: KYC «увидел» документ и снимает сам.
+      docTimer = setTimeout(() => { if (docStream) takeDocPhoto(); }, 2500);
+      docHint.textContent = 'Держите документ в рамке';
+    } catch (error) {
+      docStatus.textContent = 'Камера документа недоступна: ' + (error.message || error);
+      docStart.disabled = false;
+    }
+  }
+
+  function takeDocPhoto() {
+    if (!docStream) return;
+    clearTimeout(docTimer);
+    docShots.push(docSignature());
+    stopDocCamera();
+    if (docSide === 0) {
+      docSide = 1;
+      docStatus.textContent = 'Лицевая сторона снята. Переверните документ.';
+      docStart.disabled = false;
+      docStart.textContent = 'Снять оборот документа';
+    } else {
+      docStart.disabled = true;
+      finishDocument();
+    }
+  }
+
+  function finishDocument() {
+    const front = docShots[0];
+    const back = docShots[1];
+    const frontOk = !!front && docBright(front) > 200;
+    const backOk = !!back && docBright(back) > 200 && docDiff(front, back) > 1;
+    const liveOk = docEnergy > 0.8;
+    checks.innerHTML = '';
+    let pass = 0, total = 0;
+    total++;
+    if (row('Документ: лицевая сторона видна', frontOk,
+        'ярких пикселей: ' + (front ? docBright(front) : 0))) pass++;
+    total++;
+    if (row('Документ: оборот отличается от лицевой', backOk,
+        'разница: ' + (front && back ? docDiff(front, back).toFixed(2) : '—'))) pass++;
+    total++;
+    if (row('Документ: живая съёмка (кадры меняются)', liveOk,
+        'движение: ' + docEnergy.toFixed(2))) pass++;
+    const ok = pass === total;
+    docStatus.textContent = ok
+      ? 'Документ принят — переходите к видео'
+      : 'Документ не принят (похоже на статичное фото)';
+    if (ok) start.disabled = false;
+  }
+
+  docStart.onclick = openDocCamera;
+  docCapture.onclick = takeDocPhoto;
+
+  window.addEventListener('pagehide', () => {
+    stopDocCamera();
+    stream?.getTracks().forEach(t => t.stop());
+  });
 </script>
 </body>
 </html>
