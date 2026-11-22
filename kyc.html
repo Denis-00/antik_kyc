@@ -42,7 +42,7 @@
 </head>
 <body>
   <h1>KYC — верификация личности</h1>
-  <p>Сайт запрашивает фронтальную камеру и проверяет, что видео действительно живое и пришло с честного устройства. Модель проверок повторяет публичные сигналы Persona: отпечаток, гео/VPN-детект, liveness с позами.</p>
+  <p>Сайт запрашивает фронтальную камеру и проверяет, что видео действительно живое и пришло с честного устройства. Модель проверок повторяет публичные сигналы Persona: отпечаток, гео/VPN-детект, liveness с позами — плюс целостность видеопотока (следы инъекции «файл вместо камеры»).</p>
 
   <section id="docStage">
     <div id="docIntro">
@@ -219,6 +219,130 @@
     const ed = String(navigator.mediaDevices.enumerateDevices);
     if (row('enumerateDevices выглядит нативной', ed.includes('[native code]'),
         ed.slice(0, 60) + '…')) pass++;
+
+    return {pass, total};
+  }
+
+  // ── Целостность видеопотока ──────────────────────────────────────────
+  // Следы инъекции «файл вместо камеры»: подмена свойств трека, клон,
+  // признаки canvas-источника, рассинхрон размера, мёртвый applyConstraints,
+  // мгновенный запуск, повтор кадров и идеально ровный тайминг.
+  async function runIntegrityChecks() {
+    let pass = 0, total = 0;
+
+    // 1. Подмена через defineProperty оставляет собственные свойства трека.
+    total++;
+    const own = Object.getOwnPropertyNames(track);
+    const suspicious = own.filter(name =>
+      ['label', 'getSettings', 'getCapabilities', 'getConstraints', 'applyConstraints'].includes(name));
+    if (row('Целостность: трек без подменённых свойств', suspicious.length === 0,
+        'свойства: ' + JSON.stringify(own))) pass++;
+
+    // 2. Клон трека должен вести себя как тот же сенсор.
+    total++;
+    try {
+      const clone = track.clone();
+      const s = track.getSettings();
+      const cs = clone.getSettings();
+      const ok = cs.deviceId === s.deviceId && cs.facingMode === s.facingMode
+        && clone.label === track.label;
+      clone.stop();
+      if (row('Целостность: clone() не выдаёт трек', ok,
+          'clone deviceId=' + JSON.stringify(cs.deviceId) + ', label=' + JSON.stringify(clone.label))) pass++;
+    } catch (error) {
+      row('Целостность: clone() не выдаёт трек', false, String(error));
+    }
+
+    // 3. Canvas-источник выдаёт себя через logicalSurface/displaySurface.
+    total++;
+    const s = track.getSettings();
+    const canvasClean = !('logicalSurface' in s) && !('displaySurface' in s) && !!s.deviceId;
+    if (row('Целостность: нет признаков canvas-источника', canvasClean,
+        JSON.stringify(s))) pass++;
+
+    // 4. Заявленное разрешение должно совпадать с фактическим кадром.
+    total++;
+    await new Promise(resolve => setTimeout(resolve, 300));
+    const sizeOk = video.videoWidth > 0 && s.width === video.videoWidth && s.height === video.videoHeight;
+    if (row('Целостность: размер кадра совпадает с настройками', sizeOk,
+        'settings ' + s.width + '×' + s.height + ', кадр ' + video.videoWidth + '×' + video.videoHeight)) pass++;
+
+    // 5. applyConstraints должен реально менять настройки.
+    total++;
+    try {
+      await track.applyConstraints({width: 720});
+      const w = track.getSettings().width;
+      if (row('Целостность: applyConstraints применяется', w === 720, 'width=' + w)) pass++;
+    } catch (error) {
+      row('Целостность: applyConstraints применяется', false, String(error));
+    }
+
+    // 6. Повторный getUserMedia не должен отвечать мгновенно.
+    total++;
+    try {
+      const t0 = performance.now();
+      const extra = await navigator.mediaDevices.getUserMedia({video: {facingMode: 'user'}, audio: false});
+      const dt = performance.now() - t0;
+      extra.getTracks().forEach(t => t.stop());
+      if (row('Целостность: сенсор стартует не мгновенно', dt >= 40, dt.toFixed(0) + ' мс')) pass++;
+    } catch (error) {
+      row('Целостность: сенсор стартует не мгновенно', false, String(error));
+    }
+
+    // 7. Чужой deviceId должен отклоняться, а не молча подменяться.
+    total++;
+    try {
+      await navigator.mediaDevices.getUserMedia({video: {deviceId: {exact: 'zzz-unknown-999'}}});
+      row('Целостность: чужой deviceId отклоняется', false, 'запрос принят — подозрительно');
+    } catch (error) {
+      if (row('Целостность: чужой deviceId отклоняется', error.name === 'OverconstrainedError',
+          error.name + (error.constraint ? ': ' + error.constraint : ''))) pass++;
+    }
+
+    // 8. Кадры не должны повторяться точь-в-точь (зацикленная запись).
+    total++;
+    const seen = new Set();
+    let repeatHit = false;
+    for (let i = 0; i < 22; i++) {
+      if (video.videoWidth === 0) break;
+      const sig = signature();
+      const key = Array.from(sig.slice(0, 96)).join(',');
+      if (seen.has(key)) { repeatHit = true; break; }
+      seen.add(key);
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    if (row('Целостность: кадры не повторяются (окно 5,5 с)',
+        video.videoWidth > 0 && !repeatHit,
+        video.videoWidth === 0 ? 'видео не отрисовалось — проверка не выполнена'
+          : repeatHit ? 'точное повторение кадра — похоже на зацикленную запись' : 'повторов нет')) pass++;
+
+    // 9. Тайминг кадров: идеально ровные интервалы — признак синтетики.
+    total++;
+    if (typeof video.requestVideoFrameCallback === 'function') {
+      const deltas = [];
+      let last = null;
+      await new Promise(resolve => {
+        let count = 0;
+        const done = setTimeout(resolve, 3000);
+        const onFrame = (now, metadata) => {
+          const time = metadata.mediaTime ?? metadata.expectedDisplayTime / 1000;
+          if (Number.isFinite(time)) {
+            if (last !== null && time > last) deltas.push(time - last);
+            last = time;
+          }
+          if (++count >= 45) { clearTimeout(done); resolve(); }
+          else video.requestVideoFrameCallback(onFrame);
+        };
+        video.requestVideoFrameCallback(onFrame);
+      });
+      const mean = deltas.reduce((a, b) => a + b, 0) / (deltas.length || 1);
+      const std = Math.sqrt(deltas.reduce((a, b) => a + (b - mean) ** 2, 0) / (deltas.length || 1));
+      const ok = deltas.length >= 10 && std > 0.00002;
+      if (row('Целостность: живой тайминг кадров', ok,
+          'σ=' + (std * 1000).toFixed(2) + ' мс по ' + deltas.length + ' кадрам')) pass++;
+    } else {
+      row('Целостность: живой тайминг кадров', false, 'requestVideoFrameCallback недоступен');
+    }
 
     return {pass, total};
   }
@@ -448,7 +572,9 @@
       livenessFixedBtn.disabled = false;
       const camera = await runStaticChecks();
       const audio = await runAudioCheck(audioContext);
-      renderVerdict(camera.pass + audio.pass, camera.total + audio.total);
+      const integrity = await runIntegrityChecks();
+      renderVerdict(camera.pass + audio.pass + integrity.pass,
+                    camera.total + audio.total + integrity.total);
     } catch (e) {
       row('Получить камеру', false, String(e.message || e));
       verdict.hidden = false;

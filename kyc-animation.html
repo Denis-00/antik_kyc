@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>KYC — проверка с аватаром</title>
+<style>
+  :root { color-scheme: light dark; font: 16px/1.45 system-ui; }
+  body { margin: 0; padding: 24px; max-width: 860px; }
+  h1 { font-size: 1.4rem; }
+  button { font: inherit; padding: 9px 14px; margin: 4px 6px 4px 0; }
+  .primary { background: #111; color: #fff; border: none; border-radius: 10px; padding: 12px 16px; width: 100%; }
+  .lens { position: relative; width: min(46vh, 300px); aspect-ratio: 1 / 1; margin: 16px auto;
+          border-radius: 50%; border: 3px solid #6cf; overflow: hidden;
+          background: radial-gradient(circle at 50% 32%, #2b3442, #0d1117);
+          display: flex; align-items: center; justify-content: center; }
+  #avatar { width: 74%; transition: transform .45s cubic-bezier(.4,0,.2,1); }
+  #head { transform-box: fill-box; transform-origin: center;
+          transition: transform .45s cubic-bezier(.4,0,.2,1); }
+  #progress { height: 6px; background: #8883; border-radius: 3px; overflow: hidden;
+              margin: 10px auto 4px; max-width: 300px; }
+  #progress div { height: 100%; width: 0; background: #6cf; }
+  #phase { text-align: center; font-size: .85rem; color: #888; margin: 4px 0 10px; }
+  video { display: block; width: 100%; max-height: 34vh; background: #111; border-radius: 12px; margin: 12px 0; }
+  table { border-collapse: collapse; width: 100%; margin: 14px 0; }
+  th, td { border: 1px solid #8884; padding: 7px 9px; text-align: left; vertical-align: top; }
+  td:first-child { white-space: nowrap; }
+  .ok { color: #1a8f3c; font-weight: 700; }
+  .bad { color: #d33; font-weight: 700; }
+  .mono { font-family: ui-monospace, Menlo, monospace; font-size: 0.8rem; word-break: break-all; }
+  #verdict { font-size: 1.1rem; font-weight: 700; margin-top: 14px; padding: 12px; border-radius: 8px; }
+  .risk-low { background: #1a8f3c22; color: #1a8f3c; }
+  .risk-high { background: #d332; color: #d33; }
+</style>
+</head>
+<body>
+  <h1>Проверка с камерой</h1>
+  <p>Повторите движение за аватаром и смотрите в камеру. Это короткая проверка живости.</p>
+
+  <div id="intro">
+    <button id="begin" class="primary">Начать проверку</button>
+  </div>
+
+  <div id="stage" hidden>
+    <div class="lens">
+      <div id="avatar">
+        <svg viewBox="0 0 200 240" aria-hidden="true">
+          <g id="head">
+            <ellipse cx="100" cy="118" rx="60" ry="76" fill="#f0c7a5"/>
+            <path d="M40 94 Q50 32 100 30 Q150 32 160 94 Q150 64 100 60 Q50 64 40 94Z" fill="#343943"/>
+            <ellipse cx="74" cy="108" rx="9" ry="6" fill="#2c2c31"/>
+            <ellipse cx="126" cy="108" rx="9" ry="6" fill="#2c2c31"/>
+            <path d="M100 116 L100 136" stroke="#c99b78" stroke-width="4" stroke-linecap="round"/>
+            <path d="M82 152 Q100 164 118 152" stroke="#8a5b4a" stroke-width="4" fill="none" stroke-linecap="round"/>
+            <ellipse cx="100" cy="208" rx="46" ry="18" fill="#4a525c"/>
+          </g>
+        </svg>
+      </div>
+    </div>
+    <div id="progress"><div></div></div>
+    <p id="phase">1 / 4</p>
+    <video id="video" autoplay muted playsinline></video>
+
+    <table>
+      <thead><tr><th>Проверка</th><th>Результат</th><th>Детали</th></tr></thead>
+      <tbody id="checks"></tbody>
+    </table>
+    <div id="verdict" hidden></div>
+  </div>
+
+<script>
+  const video = document.getElementById('video');
+  const checks = document.getElementById('checks');
+  const verdict = document.getElementById('verdict');
+  const progress = document.querySelector('#progress div');
+  const phaseEl = document.getElementById('phase');
+  const head = document.getElementById('head');
+  const avatar = document.getElementById('avatar');
+
+  const PHASES = [
+    { kind: 'neutral', ms: 2500 },
+    { kind: 'left',    ms: 3000 },
+    { kind: 'neutral', ms: 2500 },
+    { kind: 'right',   ms: 3000 },
+    { kind: 'neutral', ms: 2000 }
+  ];
+  const POSES = {
+    neutral: '',
+    left: 'translateX(-20px) scaleX(.84)',
+    right: 'translateX(20px) scaleX(.84)'
+  };
+
+  let stream = null;
+  let track = null;
+  let timer = null;
+  let prev = null;
+  let history = [];
+  let current = null;
+  let phases = [];
+  let started = 0;
+  let progressId = 0;
+
+  function row(name, ok, detail) {
+    const tr = document.createElement('tr');
+    const n = document.createElement('td'); n.textContent = name;
+    const r = document.createElement('td');
+    r.innerHTML = ok ? '<span class="ok">✔ пройдено</span>' : '<span class="bad">✘ подозрительно</span>';
+    const d = document.createElement('td');
+    d.className = 'mono'; d.textContent = detail;
+    tr.append(n, r, d);
+    checks.append(tr);
+    return ok;
+  }
+
+  function frame() {
+    const w = 96, h = 64;
+    const c = document.createElement('canvas');
+    c.width = w; c.height = h;
+    const g = c.getContext('2d', {willReadFrequently: true});
+    g.drawImage(video, 0, 0, w, h);
+    const d = g.getImageData(0, 0, w, h).data;
+    const gray = new Float32Array(w * h);
+    for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+      gray[j] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    }
+    return { gray, w, h, raw: d };
+  }
+
+  function signature(sample) {
+    const sig = new Uint8Array(sample.w * sample.h);
+    for (let i = 0; i < sample.gray.length; i++) sig[i] = Math.round(sample.gray[i]);
+    return sig;
+  }
+
+  function diff(a, b) {
+    let sum = 0;
+    for (let i = 0; i < a.length; i++) sum += Math.abs(a[i] - b[i]);
+    return sum / a.length;
+  }
+
+  function median(values) {
+    if (!values.length) return 0;
+    const sorted = values.slice().sort((a, b) => a - b);
+    return sorted[Math.floor(sorted.length / 2)];
+  }
+
+  function skinCentroid(sample) {
+    const { raw, w, h } = sample;
+    let sx = 0, count = 0;
+    for (let i = 0; i < raw.length; i += 4) {
+      const r = raw[i], gr = raw[i + 1], b = raw[i + 2];
+      if (r > 95 && gr > 40 && b > 20 && r > gr && r > b && (r - gr) > 15) {
+        sx += (i / 4) % w;
+        count++;
+      }
+    }
+    return count > 200 ? sx / count / w : null;
+  }
+
+  function setPose(kind) {
+    head.style.transform = POSES[kind] || '';
+    avatar.style.transform = kind === 'neutral' ? 'scale(1)' : 'scale(.98)';
+  }
+
+  function wait(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  async function run() {
+    started = performance.now();
+    for (let i = 0; i < PHASES.length; i++) {
+      const phase = PHASES[i];
+      phaseEl.textContent = (i + 1) + ' / ' + PHASES.length;
+      setPose(phase.kind);
+      current = { kind: phase.kind, motions: [], centroids: [] };
+      phases.push(current);
+      await wait(phase.ms);
+    }
+    setPose('neutral');
+    cancelAnimationFrame(progressId);
+    progress.style.width = '100%';
+    phaseEl.textContent = 'проверка';
+    finish();
+  }
+
+  function progressLoop() {
+    if (!started) return;
+    const totalMs = PHASES.reduce((sum, p) => sum + p.ms, 0);
+    const done = Math.min(1, (performance.now() - started) / totalMs);
+    progress.style.width = (done * 100).toFixed(1) + '%';
+    progressId = requestAnimationFrame(progressLoop);
+  }
+
+  async function finish() {
+    clearInterval(timer);
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    const s = track.getSettings();
+    let pass = 0, totalChecks = 0;
+    let devices = [];
+    try { devices = await navigator.mediaDevices.enumerateDevices(); } catch {}
+
+    totalChecks++; if (row('Метка камеры', !!track.label, JSON.stringify(track.label))) pass++;
+    totalChecks++; if (row('facingMode', s.facingMode === 'user', JSON.stringify(s.facingMode))) pass++;
+    totalChecks++; if (row('Размер кадра', video.videoWidth > 0,
+        video.videoWidth + '×' + video.videoHeight)) pass++;
+    totalChecks++; if (row('Устройство в списке', devices.some(d => d.deviceId === s.deviceId),
+        JSON.stringify(devices.map(d => d.deviceId)))) pass++;
+
+    const neutralMotion = phases.filter(p => p.kind === 'neutral')
+      .map(p => median(p.motions));
+    const poseMotion = phases.filter(p => p.kind !== 'neutral')
+      .map(p => median(p.motions));
+    const still = neutralMotion.every(m => m < 2.5);
+    const moved = poseMotion.every(m => m > 3);
+    totalChecks++; if (row('Неподвижность в паузах', still,
+        neutralMotion.map(m => m.toFixed(1)).join(' / '))) pass++;
+    totalChecks++; if (row('Движение в позах', moved,
+        poseMotion.map(m => m.toFixed(1)).join(' / '))) pass++;
+
+    const centers = phases.flatMap(p => p.centroids);
+    totalChecks++; if (row('Лицо в кадре', centers.length > phases.length * 4,
+        'замеров лица: ' + centers.length)) pass++;
+
+    // Повтор кадра: сравниваем подписи, разнесённые больше чем на 0.9 с.
+    let loop = false;
+    for (let i = 0; i < history.length && !loop; i++) {
+      for (let j = i + 1; j < history.length; j++) {
+        const gap = history[j].t - history[i].t;
+        if (gap < 900) continue;
+        if (gap > 1400) break;
+        // Паузы похожи сами на себя — сравниваем только кадры с движением.
+        if (history[i].kind === 'neutral' && history[j].kind === 'neutral') continue;
+        if (diff(history[i].sig, history[j].sig) < 0.15) { loop = true; break; }
+      }
+    }
+    totalChecks++; if (row('Нет повтора кадра', !loop, loop ? 'найден повтор' : 'ок')) pass++;
+
+    const risk = totalChecks - pass;
+    verdict.hidden = false;
+    verdict.className = risk === 0 ? 'risk-low' : 'risk-high';
+    verdict.textContent = risk === 0
+      ? 'Проверка пройдена: ' + pass + '/' + totalChecks + ' чисто.'
+      : 'Подозрение: ' + risk + ' из ' + totalChecks + ' не прошли.';
+  }
+
+  document.getElementById('begin').onclick = async () => {
+    document.getElementById('intro').hidden = true;
+    document.getElementById('stage').hidden = false;
+    setPose('neutral');
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false });
+      track = stream.getVideoTracks()[0];
+      video.srcObject = stream;
+      timer = setInterval(() => {
+        if (!video.videoWidth) return;
+        const sample = frame();
+        const sig = signature(sample);
+        const centroid = skinCentroid(sample);
+        if (current) {
+          if (prev) current.motions.push(diff(sig, prev));
+          if (centroid !== null) current.centroids.push(centroid);
+        }
+        history.push({ t: performance.now(), sig, kind: current ? current.kind : 'none' });
+        if (history.length > 200) history.shift();
+        prev = sig;
+      }, 120);
+      progressLoop();
+      void run();
+    } catch (error) {
+      verdict.hidden = false;
+      verdict.className = 'risk-high';
+      verdict.textContent = 'Камеру получить не удалось: ' + (error.message || error);
+    }
+  };
+</script>
+</body>
+</html>
