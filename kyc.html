@@ -421,7 +421,13 @@
     await liveness(false);
   };
 
-  // ── Этап 1: документ (две стороны + «живая съёмка») ────────────
+  // ── Этап 1: документ (Persona-модель: детект → стабилизация → ──────
+  // ── авто-захват; блюр/блик с пересъёмкой; ручной захват) ────────────
+  const EDGE_THRESHOLD = 18;     // плотность границ: документ vs пустая сцена
+  const BLUR_THRESHOLD = 60;     // дисперсия Лапласа: ниже — размыто
+  const GLARE_THRESHOLD = 0.04;  // доля пересвеченных пикселей
+  const STABLE_TICKS = 3;        // 3×200 мс стабильности перед авто-захватом
+
   const docStart = document.getElementById('docStart');
   const docCapture = document.getElementById('docCapture');
   const docPreview = document.getElementById('docPreview');
@@ -434,17 +440,63 @@
   let docShots = [];
   let docEnergy = 0;
   let docTimer = null;
+  let docManualAfter = null;
   let docMeter = null;
   let docPrev = null;
+  let docStable = 0;
+  let docCapturing = false;
+  let docLastFrame = null;
+  let docLastMetrics = null;
 
-  function docSignature() {
+  function docFrame() {
+    const w = 96, h = 64;
     const c = document.createElement('canvas');
-    c.width = 64; c.height = 48;
+    c.width = w; c.height = h;
     const g = c.getContext('2d', {willReadFrequently: true});
-    g.drawImage(docVideo, 0, 0, 64, 48);
-    const d = g.getImageData(0, 0, 64, 48).data;
-    const sig = new Uint8Array(64 * 48);
-    for (let i = 0, j = 0; i < d.length; i += 4, j++) sig[j] = d[i];
+    g.drawImage(docVideo, 0, 0, w, h);
+    const d = g.getImageData(0, 0, w, h).data;
+    const gray = new Float32Array(w * h);
+    for (let i = 0, j = 0; i < d.length; i += 4, j++) {
+      gray[j] = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+    }
+    return {gray, w, h, raw: d};
+  }
+
+  function docMetrics(frame) {
+    const {gray, w, h, raw} = frame;
+    let edge = 0;
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const i = y * w + x;
+        const gx = -gray[i - w - 1] - 2 * gray[i - 1] - gray[i + w - 1]
+          + gray[i - w + 1] + 2 * gray[i + 1] + gray[i + w + 1];
+        const gy = -gray[i - w - 1] - 2 * gray[i - w] - gray[i - w + 1]
+          + gray[i + w - 1] + 2 * gray[i + w] + gray[i + w + 1];
+        edge += Math.abs(gx) + Math.abs(gy);
+      }
+    }
+    const edgeDensity = edge / ((w - 2) * (h - 2));
+    let lap = 0, lap2 = 0, n = 0;
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const i = y * w + x;
+        const v = 4 * gray[i] - gray[i - 1] - gray[i + 1] - gray[i - w] - gray[i + w];
+        lap += v; lap2 += v * v; n++;
+      }
+    }
+    const mean = lap / n;
+    const variance = lap2 / n - mean * mean;
+    let glare = 0;
+    for (let i = 0; i < raw.length; i += 4) {
+      if (raw[i] > 240 && raw[i + 1] > 240 && raw[i + 2] > 240) glare++;
+    }
+    const glareFraction = glare / (w * h);
+    return {edgeDensity, variance, glareFraction};
+  }
+
+  function docSignature(frame) {
+    const sig = new Uint8Array(frame.w * frame.h);
+    for (let i = 0; i < frame.gray.length; i++) sig[i] = Math.round(frame.gray[i]);
     return sig;
   }
 
@@ -462,6 +514,7 @@
 
   function stopDocCamera() {
     clearTimeout(docTimer);
+    clearTimeout(docManualAfter);
     clearInterval(docMeter);
     docTimer = null;
     docMeter = null;
@@ -478,17 +531,40 @@
       docStream = await navigator.mediaDevices.getUserMedia({video: {facingMode: 'environment'}, audio: false});
       docVideo.srcObject = docStream;
       docPreview.hidden = false;
-      docCapture.disabled = false;
+      docCapture.disabled = true;
       docPrev = null;
       docEnergy = 0;
+      docStable = 0;
+      docLastFrame = null;
+      docLastMetrics = null;
       docMeter = setInterval(() => {
         if (!docStream || docVideo.videoWidth === 0) return;
-        const sig = docSignature();
-        if (docPrev) docEnergy = Math.max(docEnergy, docDiff(docPrev, sig));
+        const frame = docFrame();
+        const metrics = docMetrics(frame);
+        docLastFrame = frame;
+        docLastMetrics = metrics;
+        const sig = docSignature(frame);
+        if (docPrev) {
+          const d = docDiff(docPrev, sig);
+          docEnergy = Math.max(docEnergy, d);
+          if (metrics.edgeDensity >= EDGE_THRESHOLD) {
+            docStable = d < 2.0 ? docStable + 1 : 0;
+            docStatus.textContent = docStable > 0
+              ? 'Документ найден — держите ровно…'
+              : 'Документ найден — не двигайте';
+            if (docStable >= STABLE_TICKS) {
+              docStable = 0;
+              takeDocPhoto();
+            }
+          } else {
+            docStable = 0;
+            docStatus.textContent = 'Документ не найден — наведите в рамку';
+          }
+        }
         docPrev = sig;
       }, 200);
-      // Имитация авто-захвата: KYC «увидел» документ и снимает сам.
-      docTimer = setTimeout(() => { if (docStream) takeDocPhoto(); }, 2500);
+      // Ручной захват всегда доступен (у Persona снимок — воля пользователя).
+      docManualAfter = setTimeout(() => { docCapture.disabled = false; }, 3000);
       docHint.textContent = 'Держите документ в рамке';
     } catch (error) {
       docStatus.textContent = 'Камера документа недоступна: ' + (error.message || error);
@@ -497,19 +573,54 @@
   }
 
   function takeDocPhoto() {
-    if (!docStream) return;
-    clearTimeout(docTimer);
-    docShots.push(docSignature());
-    stopDocCamera();
-    if (docSide === 0) {
-      docSide = 1;
-      docStatus.textContent = 'Лицевая сторона снята. Переверните документ.';
-      docStart.disabled = false;
-      docStart.textContent = 'Снять оборот документа';
-    } else {
-      docStart.disabled = true;
-      finishDocument();
+    if (!docStream || docCapturing) return;
+    docCapturing = true;
+    try {
+      const metrics = docLastMetrics;
+      const frame = docLastFrame;
+      if (!metrics || !frame) { docCapturing = false; return; }
+      if (metrics.edgeDensity < EDGE_THRESHOLD) {
+        docStatus.textContent = 'Документ не найден — наведите в рамку';
+        scheduleRetry();
+        return;
+      }
+      if (metrics.variance < BLUR_THRESHOLD) {
+        docStatus.textContent = 'Снимок размыт — переснимите';
+        scheduleRetry();
+        return;
+      }
+      if (metrics.glareFraction > GLARE_THRESHOLD) {
+        docStatus.textContent = 'Блик — уберите свет и переснимите';
+        scheduleRetry();
+        return;
+      }
+      clearTimeout(docTimer);
+      clearTimeout(docManualAfter);
+      // Настоящий KYC снимает кадр через canvas → toDataURL/toBlob.
+      // Делаем так же — и это же служит маркером «снимок сделан».
+      const shot = document.createElement('canvas');
+      shot.width = 640; shot.height = 480;
+      shot.getContext('2d').drawImage(docVideo, 0, 0, shot.width, shot.height);
+      shot.toDataURL('image/jpeg', 0.8);
+      docShots.push(docSignature(frame));
+      stopDocCamera();
+      if (docSide === 0) {
+        docSide = 1;
+        docStatus.textContent = 'Лицевая сторона снята. Переверните документ.';
+        docStart.disabled = false;
+        docStart.textContent = 'Снять оборот документа';
+      } else {
+        docStart.disabled = true;
+        finishDocument();
+      }
+    } finally {
+      docCapturing = false;
     }
+  }
+
+  function scheduleRetry() {
+    clearTimeout(docTimer);
+    docTimer = setTimeout(() => { if (docStream) takeDocPhoto(); }, 1500);
   }
 
   function finishDocument() {
