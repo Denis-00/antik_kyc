@@ -14,6 +14,8 @@
   #docPreview { position: relative; margin: 14px 0; background: #111; border-radius: 10px; overflow: hidden; }
   #docPreview video { margin: 0; max-height: 46vh; object-fit: cover; }
   #docGuide { position: absolute; inset: 12% 8%; border: 2px dashed #6cf; border-radius: 8px; pointer-events: none; }
+  #docReview { margin: 14px 0; }
+  #docReview img { display: block; width: 100%; max-height: 40vh; object-fit: contain; background: #111; border-radius: 10px; }
   table { border-collapse: collapse; width: 100%; margin: 14px 0; }
   th, td { border: 1px solid #8884; padding: 7px 9px; text-align: left; vertical-align: top; }
   td:first-child { white-space: nowrap; }
@@ -39,6 +41,11 @@
   </div>
   <button id="docStart">Открыть камеру для документа</button>
   <button id="docCapture" disabled>Сфотографировать</button>
+  <div id="docReview" hidden>
+    <img id="docReviewImage" alt="Фото документа" />
+    <button id="docUse">Использовать фото</button>
+    <button id="docRetake">Переснять</button>
+  </div>
   <p id="docStatus"></p>
 
   <h2>Этап 2 — видео</h2>
@@ -423,7 +430,9 @@
 
   // ── Этап 1: документ (Persona-модель: детект → стабилизация → ──────
   // ── авто-захват; блюр/блик с пересъёмкой; ручной захват) ────────────
-  const EDGE_THRESHOLD = 18;     // плотность границ: документ vs пустая сцена
+  const SHUTTER_EDGE = 10;       // кнопка съёмки: «похоже на документ»
+  const EDGE_THRESHOLD = 18;     // авто-захват: уверенный детект документа
+  const ACCEPT_EDGE = 25;        // приёмка: настоящий документ (текст/фото)
   const BLUR_THRESHOLD = 60;     // дисперсия Лапласа: ниже — размыто
   const GLARE_THRESHOLD = 0.04;  // доля пересвеченных пикселей
   const STABLE_TICKS = 3;        // 3×200 мс стабильности перед авто-захватом
@@ -434,6 +443,10 @@
   const docVideo = document.getElementById('docVideo');
   const docStatus = document.getElementById('docStatus');
   const docHint = document.getElementById('docHint');
+  const docReview = document.getElementById('docReview');
+  const docReviewImage = document.getElementById('docReviewImage');
+  const docUse = document.getElementById('docUse');
+  const docRetake = document.getElementById('docRetake');
 
   let docStream = null;
   let docSide = 0;
@@ -547,11 +560,13 @@
         if (docPrev) {
           const d = docDiff(docPrev, sig);
           docEnergy = Math.max(docEnergy, d);
-          if (metrics.edgeDensity >= EDGE_THRESHOLD) {
-            docStable = d < 2.0 ? docStable + 1 : 0;
-            docStatus.textContent = docStable > 0
-              ? 'Документ найден — держите ровно…'
-              : 'Документ найден — не двигайте';
+          const detected = metrics.edgeDensity >= SHUTTER_EDGE;
+          // Как у Persona: затвор доступен, только когда в кадре «документ».
+          docCapture.disabled = !detected;
+          if (detected) {
+            docStable = metrics.edgeDensity >= EDGE_THRESHOLD && d < 2.0 ? docStable + 1 : 0;
+            docStatus.textContent = (metrics.edgeDensity >= EDGE_THRESHOLD
+              ? 'Документ найден' : 'Похоже на документ') + ' — держите ровно…';
             if (docStable >= STABLE_TICKS) {
               docStable = 0;
               takeDocPhoto();
@@ -563,8 +578,6 @@
         }
         docPrev = sig;
       }, 200);
-      // Ручной захват всегда доступен (у Persona снимок — воля пользователя).
-      docManualAfter = setTimeout(() => { docCapture.disabled = false; }, 3000);
       docHint.textContent = 'Держите документ в рамке';
     } catch (error) {
       docStatus.textContent = 'Камера документа недоступна: ' + (error.message || error);
@@ -572,55 +585,82 @@
     }
   }
 
+  let docShotData = null;
+  let docShotSig = null;
+  let docShotMetrics = null;
+
   function takeDocPhoto() {
     if (!docStream || docCapturing) return;
     docCapturing = true;
     try {
       const metrics = docLastMetrics;
       const frame = docLastFrame;
-      if (!metrics || !frame) { docCapturing = false; return; }
-      if (metrics.edgeDensity < EDGE_THRESHOLD) {
+      if (!metrics || !frame) return;
+      if (metrics.edgeDensity < SHUTTER_EDGE) {
         docStatus.textContent = 'Документ не найден — наведите в рамку';
-        scheduleRetry();
-        return;
-      }
-      if (metrics.variance < BLUR_THRESHOLD) {
-        docStatus.textContent = 'Снимок размыт — переснимите';
-        scheduleRetry();
-        return;
-      }
-      if (metrics.glareFraction > GLARE_THRESHOLD) {
-        docStatus.textContent = 'Блик — уберите свет и переснимите';
-        scheduleRetry();
         return;
       }
       clearTimeout(docTimer);
-      clearTimeout(docManualAfter);
-      // Настоящий KYC снимает кадр через canvas → toDataURL/toBlob.
-      // Делаем так же — и это же служит маркером «снимок сделан».
+      // Настоящий KYC снимает кадр через canvas → toDataURL/toBlob
+      // и показывает его на подтверждение («Use this photo / Retake»).
       const shot = document.createElement('canvas');
       shot.width = 640; shot.height = 480;
       shot.getContext('2d').drawImage(docVideo, 0, 0, shot.width, shot.height);
-      shot.toDataURL('image/jpeg', 0.8);
-      docShots.push(docSignature(frame));
+      docShotData = shot.toDataURL('image/jpeg', 0.85);
+      docShotSig = docSignature(frame);
+      docShotMetrics = metrics;
       stopDocCamera();
-      if (docSide === 0) {
-        docSide = 1;
-        docStatus.textContent = 'Лицевая сторона снята. Переверните документ.';
-        docStart.disabled = false;
-        docStart.textContent = 'Снять оборот документа';
-      } else {
-        docStart.disabled = true;
-        finishDocument();
-      }
+      showReview();
     } finally {
       docCapturing = false;
     }
   }
 
-  function scheduleRetry() {
-    clearTimeout(docTimer);
-    docTimer = setTimeout(() => { if (docStream) takeDocPhoto(); }, 1500);
+  function showReview() {
+    docReviewImage.src = docShotData;
+    docReview.hidden = false;
+    docStatus.textContent = docSide === 0
+      ? 'Проверьте фото лицевой стороны'
+      : 'Проверьте фото оборота';
+  }
+
+  function retakeShot() {
+    docReview.hidden = true;
+    docShotData = null;
+    docShotSig = null;
+    docShotMetrics = null;
+    openDocCamera();
+  }
+
+  function acceptShot() {
+    const m = docShotMetrics;
+    if (!m || !docShotSig) return;
+    if (m.edgeDensity < ACCEPT_EDGE) {
+      docStatus.textContent = 'Это не похоже на документ — переснимите';
+      return;
+    }
+    if (m.variance < BLUR_THRESHOLD) {
+      docStatus.textContent = 'Фото размыто — переснимите';
+      return;
+    }
+    if (m.glareFraction > GLARE_THRESHOLD) {
+      docStatus.textContent = 'Блик — уберите свет и переснимите';
+      return;
+    }
+    docReview.hidden = true;
+    docShots.push(docShotSig);
+    docShotData = null;
+    docShotSig = null;
+    docShotMetrics = null;
+    if (docSide === 0) {
+      docSide = 1;
+      docStatus.textContent = 'Лицевая сторона принята. Переверните документ.';
+      docStart.disabled = false;
+      docStart.textContent = 'Снять оборот документа';
+    } else {
+      docStart.disabled = true;
+      finishDocument();
+    }
   }
 
   function finishDocument() {
@@ -649,6 +689,8 @@
 
   docStart.onclick = openDocCamera;
   docCapture.onclick = takeDocPhoto;
+  docUse.onclick = acceptShot;
+  docRetake.onclick = retakeShot;
 
   window.addEventListener('pagehide', () => {
     stopDocCamera();
