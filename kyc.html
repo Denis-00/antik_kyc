@@ -473,21 +473,52 @@
         { kind: 'pose', pose: turns[1].key, text: turns[1].text }
       ];
       const results = phases.map(p => ({kind: p.kind, pose: p.pose ?? null, motion: 0, shift: null}));
+      const PHASE_TIMEOUT = 12000;  // не дождались выполнения — идём дальше
+      const MIN_PHASE = 700;        // даём кадру обновиться после команды
+      const history = [];
+      const startTime = performance.now();
       let index = 0;
       let prev = null;
       let phaseMotions = [];
       let centroids = [];
       let baseline = null;
       let loopHit = false;
-      const history = [];
-      const startTime = performance.now();
+      let phaseStarted = startTime;
+      let lastHint = '';
+
+      const setCommand = suffix => {
+        const text = (index + 1) + '/4 (' +
+          (randomOrder ? 'случайный' : 'фиксированный') + '): ' +
+          phases[index].text + (suffix || '');
+        if (text !== lastHint) { lastHint = text; command.textContent = text; }
+      };
+
+      const finish = () => {
+        clearInterval(tick);
+        const freezeOk = results.filter(r => r.kind === 'freeze').every(r => r.motion < 2.5);
+        const poseMotionOk = results.filter(r => r.kind === 'pose').every(r => r.motion > 3);
+        // Направление показываем в итоге, но в вердикт не засчитываем:
+        // фронталка бывает зеркальной, и знак сдвига зависит от устройства.
+        const ok = freezeOk && poseMotionOk && !loopHit;
+        const summary = results.map(r => {
+          if (r.kind === 'freeze') return 'пауза ' + r.motion.toFixed(1);
+          return r.pose + ' ' + r.motion.toFixed(1) +
+            (r.shift !== null ? '(' + (r.shift > 0 ? '+' : '') + r.shift.toFixed(2) + ')' : '');
+        }).join(' / ');
+        command.textContent = 'Итог: ' + summary +
+          (loopHit ? '  |  ⚠ цикл' : '') +
+          ' — ' + (ok ? 'выполнено' : 'НЕ выполнено / запись');
+        resolve(ok);
+      };
+
+      setCommand(' · ждём');
 
       const tick = setInterval(() => {
         if (video.videoWidth === 0) return;
         const sig = signature();
         const centroid = skinCentroid();
-        if (centroid !== null) centroids.push(centroid);
         const t = performance.now() - startTime;
+        if (centroid !== null) centroids.push(centroid);
         if (prev) {
           phaseMotions.push(diff(sig, prev));
           history.push({t, sig});
@@ -502,47 +533,61 @@
         prev = sig;
         motionEl.textContent = 'Движение: ' + median(phaseMotions).toFixed(2) +
           (loopHit ? '  |  ⚠ повтор кадра (цикл) — это запись' : '');
-      }, 120);
 
-      command.textContent = '1/4 (' + (randomOrder ? 'случайный' : 'фиксированный') + '): ' + phases[0].text;
-
-      const step = setInterval(() => {
         const phase = phases[index];
-        // Паузу оцениваем медианой (моргание не валит), позу — максимумом.
-        results[index].motion = phase.kind === 'freeze'
-          ? median(phaseMotions)
-          : (phaseMotions.length ? Math.max(...phaseMotions) : 0);
-        const centroid = centroids.length ? median(centroids) : null;
+        const elapsed = performance.now() - phaseStarted;
+        if (elapsed < MIN_PHASE) return;
+
+        // Фаза ждёт выполнения: пауза — неподвижность, поза — заметный
+        // сдвиг лица от нейтрали. Таймаут не даёт зависнуть.
+        let ready = false;
         if (phase.kind === 'freeze') {
-          baseline = centroid ?? baseline;
+          const recent = phaseMotions.slice(-6);
+          ready = recent.length >= 3 && median(recent) < 2.5;
         } else {
-          results[index].shift = centroid !== null && baseline !== null
-            ? centroid - baseline : null;
+          const center = centroids.length ? median(centroids) : null;
+          const moved = center !== null && baseline !== null &&
+            Math.abs(center - baseline) > DIRECTION_THRESHOLD;
+          const active = phaseMotions.slice(-4).some(d => d > 3);
+          ready = moved && active;
+        }
+        if (!ready && elapsed < PHASE_TIMEOUT) {
+          setCommand(' · ждём выполнение');
+          return;
+        }
+
+        // Паузу оцениваем по «устоявшемуся» хвосту фазы: в начале ещё
+        // идёт возврат из позы, и он не должен портить вердикт.
+        const settle = phaseMotions.slice(-8);
+        results[index].motion = phase.kind === 'freeze'
+          ? median(settle)
+          : (phaseMotions.length ? Math.max(...phaseMotions) : 0);
+        const center = centroids.length ? median(centroids.slice(-8)) : null;
+        if (phase.kind === 'freeze') {
+          baseline = center ?? baseline;
+        } else {
+          results[index].shift = center !== null && baseline !== null
+            ? center - baseline : null;
         }
         phaseMotions = [];
         centroids = [];
         index++;
         if (index >= phases.length) {
-          clearInterval(tick);
-          clearInterval(step);
-          const freezeOk = results.filter(r => r.kind === 'freeze').every(r => r.motion < 2.5);
-          const poseMotionOk = results.filter(r => r.kind === 'pose').every(r => r.motion > 3);
-          // Направление показываем в итоге, но в вердикт не засчитываем:
-          // фронталка бывает зеркальной, и знак сдвига зависит от устройства.
-          const ok = freezeOk && poseMotionOk && !loopHit;
-          const summary = results.map(r => {
-            if (r.kind === 'freeze') return 'пауза ' + r.motion.toFixed(1);
-            return r.pose + ' ' + r.motion.toFixed(1) +
-              (r.shift !== null ? '(' + (r.shift > 0 ? '+' : '') + r.shift.toFixed(2) + ')' : '');
-          }).join(' / ');
-          command.textContent = 'Итог: ' + summary +
-            (loopHit ? '  |  ⚠ цикл' : '') +
-            ' — ' + (ok ? 'выполнено' : 'НЕ выполнено / запись');
-          resolve(ok);
-        } else {
-          command.textContent = (index + 1) + '/4: ' + phases[index].text;
+          finish();
+          return;
         }
-      }, 2000);
+        phaseStarted = performance.now();
+        setCommand(' · ждём');
+      }, 120);
+
+      // Если камера вообще не отдала кадры — не висим бесконечно.
+      setTimeout(() => {
+        if (video.videoWidth === 0) {
+          clearInterval(tick);
+          command.textContent = 'Камера не отдала кадры';
+          resolve(false);
+        }
+      }, 8000);
     });
   }
 
