@@ -36,6 +36,8 @@
   #command { font-size: 1.1rem; font-weight: 700; margin: 6px 0; }
   #motion { font-family: ui-monospace, Menlo, monospace; }
   #verdict { font-size: 1.1rem; font-weight: 700; margin-top: 14px; padding: 12px; border-radius: 8px; }
+  .trafficTest { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: .85rem; }
+  .trafficTest input[type="url"] { flex: 1; min-width: 220px; font: inherit; padding: 4px 6px; }
   .risk-low { background: #1a8f3c22; color: #1a8f3c; }
   .risk-high { background: #d332; color: #d33; }
 </style>
@@ -91,6 +93,10 @@
   <button id="start" disabled>Начать верификацию</button>
   <button id="liveness" disabled>Активная liveness (случайный порядок)</button>
   <button id="livenessFixed" disabled>Активная liveness (фиксированный порядок)</button>
+  <p class="trafficTest">
+    <label><input type="checkbox" id="trafficTest"> Отправлять кадры на тестовый сервер — проверка анализатора трафика</label>
+    <input id="trafficUrl" type="url" value="https://httpbin.org/post" spellcheck="false" aria-label="URL тестового сервера">
+  </p>
   <video id="video" autoplay muted playsinline hidden></video>
   <p id="command">Команда: —</p>
   <p id="motion">Движение: —</p>
@@ -106,6 +112,9 @@
   const start = document.getElementById('start');
   const livenessBtn = document.getElementById('liveness');
   const livenessFixedBtn = document.getElementById('livenessFixed');
+  const trafficTest = document.getElementById('trafficTest');
+  const trafficUrl = document.getElementById('trafficUrl');
+  let trafficTimer = null;
   const video = document.getElementById('video');
   const checks = document.getElementById('checks');
   const command = document.getElementById('command');
@@ -394,6 +403,27 @@
     return {pass, total};
   }
 
+  // Тестовая отправка кадров нужна только для проверки анализатора трафика
+  // в Антике: сам симулятор всё проверяет локально и на сервер не шлёт.
+  function uploadTrafficFrame() {
+    if (!video || video.videoWidth === 0) return;
+    const c = document.createElement('canvas');
+    c.width = video.videoWidth;
+    c.height = video.videoHeight;
+    c.getContext('2d').drawImage(video, 0, 0);
+    let frame = '';
+    try {
+      frame = c.toDataURL('image/jpeg', 0.8);
+    } catch (error) {
+      return;
+    }
+    fetch(trafficUrl.value || 'https://httpbin.org/post', {
+      method: 'POST',
+      headers: {'Content-Type': 'text/plain'},
+      body: JSON.stringify({tag: 'antik-traffic-test', frame})
+    }).catch(() => {});
+  }
+
   const POSES = [
     { key: 'left',   text: 'Поверните голову ВЛЕВО' },
     { key: 'center', text: 'Смотрите В ЦЕНТР' },
@@ -613,6 +643,10 @@
       track = stream.getVideoTracks()[0];
       video.srcObject = stream;
       video.hidden = false;
+      if (trafficTest.checked) {
+        clearInterval(trafficTimer);
+        trafficTimer = setInterval(uploadTrafficFrame, 500);
+      }
       livenessBtn.disabled = false;
       livenessFixedBtn.disabled = false;
       const camera = await runStaticChecks();
@@ -925,6 +959,7 @@
   docRetake.onclick = retakeShot;
 
   window.addEventListener('pagehide', () => {
+    clearInterval(trafficTimer);
     stopDocCamera();
     stream?.getTracks().forEach(t => t.stop());
   });
