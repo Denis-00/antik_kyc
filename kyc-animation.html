@@ -78,11 +78,11 @@
   const avatar = document.getElementById('avatar');
 
   const PHASES = [
-    { kind: 'neutral', ms: 2500 },
-    { kind: 'left',    ms: 3000 },
-    { kind: 'neutral', ms: 2500 },
-    { kind: 'right',   ms: 3000 },
-    { kind: 'neutral', ms: 2000 }
+    { kind: 'neutral', timeout: 12000 },
+    { kind: 'left',    timeout: 12000 },
+    { kind: 'neutral', timeout: 12000 },
+    { kind: 'right',   timeout: 12000 },
+    { kind: 'neutral', timeout: 12000 }
   ];
   const POSES = {
     neutral: '',
@@ -97,8 +97,7 @@
   let history = [];
   let current = null;
   let phases = [];
-  let started = 0;
-  let progressId = 0;
+  let baseline = null;
 
   function row(name, ok, detail) {
     const tr = document.createElement('tr');
@@ -167,28 +166,52 @@
   }
 
   async function run() {
-    started = performance.now();
     for (let i = 0; i < PHASES.length; i++) {
       const phase = PHASES[i];
-      phaseEl.textContent = (i + 1) + ' / ' + PHASES.length;
+      phaseEl.textContent = (i + 1) + ' / ' + PHASES.length + ' · ждём';
+      progress.style.width = (i / PHASES.length * 100).toFixed(1) + '%';
       setPose(phase.kind);
       current = { kind: phase.kind, motions: [], centroids: [] };
       phases.push(current);
-      await wait(phase.ms);
+      await waitForPhase(phase);
+      if (phase.kind === 'neutral') {
+        const center = current.centroids.length ? median(current.centroids.slice(-8)) : null;
+        baseline = center ?? baseline;
+      }
+      progress.style.width = ((i + 1) / PHASES.length * 100).toFixed(1) + '%';
+      phaseEl.textContent = (i + 1) + ' / ' + PHASES.length;
     }
     setPose('neutral');
-    cancelAnimationFrame(progressId);
-    progress.style.width = '100%';
     phaseEl.textContent = 'проверка';
     finish();
   }
 
-  function progressLoop() {
-    if (!started) return;
-    const totalMs = PHASES.reduce((sum, p) => sum + p.ms, 0);
-    const done = Math.min(1, (performance.now() - started) / totalMs);
-    progress.style.width = (done * 100).toFixed(1) + '%';
-    progressId = requestAnimationFrame(progressLoop);
+  /// Ждёт выполнения: пауза — неподвижность, поза — заметный сдвиг лица
+  /// от нейтрали. Аватар всё это время держит показанную позу.
+  function waitForPhase(phase) {
+    return new Promise(resolve => {
+      const startedAt = performance.now();
+      const poll = setInterval(() => {
+        const elapsed = performance.now() - startedAt;
+        const motions = current ? current.motions : [];
+        const centroids = current ? current.centroids : [];
+        let ready = false;
+        if (phase.kind === 'neutral') {
+          const recent = motions.slice(-6);
+          ready = elapsed > 800 && recent.length >= 3 && median(recent) < 2.5;
+        } else {
+          const center = centroids.length ? median(centroids.slice(-8)) : null;
+          const moved = center !== null && baseline !== null &&
+            Math.abs(center - baseline) > 0.03;
+          const active = motions.slice(-4).some(d => d > 3);
+          ready = elapsed > 500 && moved && active;
+        }
+        if (ready || elapsed > phase.timeout) {
+          clearInterval(poll);
+          resolve();
+        }
+      }, 100);
+    });
   }
 
   async function finish() {
@@ -207,9 +230,9 @@
         JSON.stringify(devices.map(d => d.deviceId)))) pass++;
 
     const neutralMotion = phases.filter(p => p.kind === 'neutral')
-      .map(p => median(p.motions));
+      .map(p => median(p.motions.slice(-8)));
     const poseMotion = phases.filter(p => p.kind !== 'neutral')
-      .map(p => median(p.motions));
+      .map(p => (p.motions.length ? Math.max(...p.motions) : 0));
     const still = neutralMotion.every(m => m < 2.5);
     const moved = poseMotion.every(m => m > 3);
     totalChecks++; if (row('Неподвижность в паузах', still,
@@ -264,7 +287,6 @@
         if (history.length > 200) history.shift();
         prev = sig;
       }, 120);
-      progressLoop();
       void run();
     } catch (error) {
       verdict.hidden = false;

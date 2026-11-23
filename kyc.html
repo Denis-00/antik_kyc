@@ -24,6 +24,7 @@
   .ghost { background: transparent; border: 1px solid #8888; border-radius: 10px; }
   .primary { background: #111; color: #fff; border: none; border-radius: 10px; padding: 12px 16px; width: 100%; }
   .docCard { border: 2px dashed #bbb; border-radius: 12px; padding: 36px; text-align: center; font-size: 2rem; color: #999; margin: 12px 0; }
+  .docOption { display: flex; gap: 8px; align-items: center; font-size: .9rem; margin: 10px 0; }
   #docReviewScreen img { display: block; width: 100%; max-height: 40vh; object-fit: contain; background: #111; border-radius: 12px; }
   #docReviewLabel { background: #d9d9d9; color: #222; padding: 10px 14px; border-radius: 0 0 12px 12px; font-weight: 600; margin-bottom: 10px; }
   #docProcessing { padding: 28px; text-align: center; font-weight: 700; }
@@ -50,6 +51,7 @@
     <div id="docIntro">
       <h2>Верификация с камерой</h2>
       <p>Мы сделаем фото документа и короткое видео. Это подтвердит личность.</p>
+      <label class="docOption"><input type="checkbox" id="docSingleSide"> Только одна сторона документа (паспорт)</label>
       <button id="docBegin" class="primary">Продолжить</button>
     </div>
 
@@ -694,6 +696,7 @@
   const docShutter = document.getElementById('docShutter');
   const docTips = document.getElementById('docTips');
   const docUse = document.getElementById('docUse');
+  const docSingleSide = document.getElementById('docSingleSide');
   const docRetake = document.getElementById('docRetake');
   const docPreview = document.getElementById('docPreview');
   const docVideo = document.getElementById('docVideo');
@@ -909,7 +912,7 @@
     docShotData = null;
     docShotSig = null;
     docShotMetrics = null;
-    if (docSide === 0) {
+    if (docSide === 0 && !docSingleSide.checked) {
       docSide = 1;
       docPromptText.textContent = 'Теперь сфотографируйте оборотную сторону документа.';
       showDocScreen(docPrompt);
@@ -930,9 +933,11 @@
     total++;
     if (row('Документ: лицевая сторона видна', frontOk,
         'ярких пикселей: ' + (front ? docBright(front) : 0))) pass++;
-    total++;
-    if (row('Документ: оборот отличается от лицевой', backOk,
-        'разница: ' + (front && back ? docDiff(front, back).toFixed(2) : '—'))) pass++;
+    if (!docSingleSide.checked) {
+      total++;
+      if (row('Документ: оборот отличается от лицевой', backOk,
+          'разница: ' + (front && back ? docDiff(front, back).toFixed(2) : '—'))) pass++;
+    }
     total++;
     if (row('Документ: живая съёмка (кадры меняются)', liveOk,
         'движение: ' + docEnergy.toFixed(2))) pass++;
