@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: blob:; connect-src 'none'; media-src 'none'; font-src 'none'; form-action 'none'; base-uri 'none'">
+<title>Antik Fingerprint Lab</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; padding: 18px; font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f5f5f4; color: #171717; }
+  h1 { font-size: 22px; margin: 0 0 6px; }
+  p { margin: 0 0 12px; color: #525252; }
+  .warn { padding: 10px 12px; border-radius: 10px; background: #e8f5e9; color: #1b5e20; margin-bottom: 12px; }
+  .buttons { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+  button { font: inherit; padding: 9px 12px; border-radius: 10px; border: 1px solid #d4d4d4; background: #fff; color: #171717; }
+  button:active { background: #e5e5e5; }
+  pre { white-space: pre-wrap; word-break: break-word; background: #111; color: #e5e5e5; padding: 14px; border-radius: 12px; font: 12px/1.45 ui-monospace, Menlo, monospace; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #111; color: #eee; }
+    p { color: #aaa; }
+    .warn { background: #14321a; color: #b9f6ca; }
+    button { background: #1c1c1c; color: #eee; border-color: #333; }
+    pre { background: #000; }
+  }
+</style>
+</head>
+<body>
+  <h1>Antik Fingerprint Lab</h1>
+  <p>Локальная страница для сравнения отпечатков iPhone и Mac-эмулятора.</p>
+  <div class="warn">Ничего не отправляет. Камера и микрофон не запрашиваются. Сетевые запросы запрещены CSP.</div>
+  <div class="buttons">
+    <button id="copy">Скопировать JSON</button>
+    <button id="download">Скачать JSON</button>
+    <button id="run">Пересобрать</button>
+  </div>
+  <pre id="out">Собираю…</pre>
+<script>
+(function () {
+  'use strict';
+
+  const out = document.getElementById('out');
+  const report = {};
+
+  const fnv = (text) => {
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < text.length; i++) {
+      hash ^= text.charCodeAt(i);
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+    return ('00000000' + hash.toString(16)).slice(-8);
+  };
+
+  const hashBytes = (bytes) => {
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < bytes.length; i++) {
+      hash ^= bytes[i];
+      hash = Math.imul(hash, 0x01000193) >>> 0;
+    }
+    return ('00000000' + hash.toString(16)).slice(-8);
+  };
+
+  const safe = (fn, fallback = null) => {
+    try { return fn(); } catch (error) { return fallback; }
+  };
+
+  const asyncSafe = async (fn, fallback = null) => {
+    try { return await fn(); } catch (error) { return fallback; }
+  };
+
+  async function canvasFingerprint() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 240;
+    canvas.height = 80;
+    const context = canvas.getContext('2d');
+    if (!context) return null;
+    context.textBaseline = 'top';
+    context.font = '16px "Helvetica Neue", Arial';
+    context.fillStyle = '#f60';
+    context.fillRect(0, 0, 240, 80);
+    context.fillStyle = '#069';
+    context.fillText('Antik fingerprint 🦊', 4, 8);
+    context.fillStyle = 'rgba(102, 204, 0, 0.7)';
+    context.beginPath();
+    context.arc(200, 40, 24, 0, Math.PI * 2);
+    context.fill();
+    const data = canvas.toDataURL();
+    return { hash: fnv(data), length: data.length };
+  }
+
+  function webglFingerprint() {
+    const canvas = document.createElement('canvas');
+    const gl = canvas.getContext('webgl') || canvas.getContext('experimental-webgl');
+    if (!gl) return null;
+    const debug = gl.getExtension('WEBGL_debug_renderer_info');
+    const extensions = gl.getSupportedExtensions() || [];
+    const parameters = {};
+    for (const name of ['VERSION', 'SHADING_LANGUAGE_VERSION', 'MAX_TEXTURE_SIZE', 'MAX_RENDERBUFFER_SIZE', 'MAX_VIEWPORT_DIMS', 'ALIASED_LINE_WIDTH_RANGE']) {
+      const value = gl.getParameter(gl[name]);
+      parameters[name] = value && typeof value.length === 'number' ? Array.from(value) : value;
+    }
+    return {
+      vendor: debug ? gl.getParameter(debug.UNMASKED_VENDOR_WEBGL) : null,
+      renderer: debug ? gl.getParameter(debug.UNMASKED_RENDERER_WEBGL) : null,
+      parameters,
+      extensionCount: extensions.length,
+      extensionSample: extensions.slice(0, 25)
+    };
+  }
+
+  async function audioFingerprint() {
+    const Offline = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    if (!Offline) return null;
+    try {
+      const context = new Offline(1, 44100, 44100);
+      const oscillator = context.createOscillator();
+      oscillator.type = 'triangle';
+      oscillator.frequency.value = 10000;
+      const compressor = context.createDynamicsCompressor();
+      compressor.threshold.value = -50;
+      compressor.knee.value = 40;
+      compressor.ratio.value = 12;
+      compressor.attack.value = 0;
+      compressor.release.value = 0.25;
+      oscillator.connect(compressor);
+      compressor.connect(context.destination);
+      oscillator.start(0);
+      const buffer = await context.startRendering();
+      const samples = buffer.getChannelData(0);
+      const slice = new Float32Array(2048);
+      for (let i = 0; i < slice.length; i++) slice[i] = samples[i * 10] || 0;
+      return {
+        sampleRate: buffer.sampleRate,
+        length: buffer.length,
+        hash: hashBytes(new Uint8Array(slice.buffer)),
+        checksum: Array.from(slice.slice(0, 16)).map(value => value.toFixed(5)).join(',')
+      };
+    } catch (error) {
+      return { error: String(error) };
+    }
+  }
+
+  function fontFingerprint() {
+    const candidates = [
+      'Helvetica Neue', 'Helvetica', 'Arial', 'Arial Hebrew', 'Avenir',
+      'Avenir Next', 'Georgia', 'Times New Roman', 'Courier', 'Courier New',
+      'Menlo', 'Monaco', 'SF Pro Text', 'SF Pro Display', 'San Francisco',
+      'PingFang SC', 'Hiragino Sans', 'Apple Color Emoji', 'Noto Sans',
+      'Roboto', 'Segoe UI', 'Verdana', 'Tahoma', 'Trebuchet MS'
+    ];
+    const canvas = document.createElement('canvas');
+    const context = canvas.getContext('2d');
+    if (!context) return null;
+    const result = {};
+    for (const font of candidates) {
+      result[font] = safe(() => {
+        const available = document.fonts ? document.fonts.check('12px "' + font + '"') : false;
+        context.font = '16px "' + font + '", monospace';
+        const width = context.measureText('mmmmmmmmmmlli').width;
+        return { available, width: Number(width.toFixed(3)) };
+      }, null);
+    }
+    return result;
+  }
+
+  async function mediaFingerprint() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) return null;
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    return devices.map(device => ({
+      kind: device.kind,
+      label: device.label,
+      deviceId: device.deviceId,
+      groupId: device.groupId
+    }));
+  }
+
+  async function permissionFingerprint() {
+    if (!navigator.permissions || !navigator.permissions.query) return null;
+    const result = {};
+    for (const name of ['camera', 'microphone', 'geolocation']) {
+      result[name] = await asyncSafe(async () => {
+        const status = await navigator.permissions.query({ name });
+        return status.state;
+      }, 'unavailable');
+    }
+    return result;
+  }
+
+  function mediaQueryFingerprint() {
+    const queries = [
+      '(pointer: coarse)', '(pointer: fine)', '(any-pointer: coarse)',
+      '(hover: none)', '(hover: hover)', '(any-hover: none)',
+      '(display-mode: standalone)', '(prefers-color-scheme: dark)'
+    ];
+    const result = {};
+    for (const query of queries) {
+      result[query] = safe(() => matchMedia(query).matches, null);
+    }
+    return result;
+  }
+
+  async function collect() {
+    report.collectedAt = new Date().toISOString();
+    report.location = 'local-only';
+    report.protocol = location.protocol;
+    report.userAgent = navigator.userAgent;
+    report.userAgentData = safe(() => navigator.userAgentData ? {
+      brands: navigator.userAgentData.brands,
+      mobile: navigator.userAgentData.mobile,
+      platform: navigator.userAgentData.platform
+    } : null, null);
+    report.platform = navigator.platform;
+    report.vendor = navigator.vendor;
+    report.product = navigator.product;
+    report.language = navigator.language;
+    report.languages = navigator.languages;
+    report.maxTouchPoints = navigator.maxTouchPoints;
+    report.hardwareConcurrency = navigator.hardwareConcurrency;
+    report.deviceMemory = safe(() => navigator.deviceMemory, null);
+    report.cookieEnabled = navigator.cookieEnabled;
+    report.onLine = navigator.onLine;
+    report.standalone = safe(() => navigator.standalone, null);
+    report.pdfViewerEnabled = safe(() => navigator.pdfViewerEnabled, null);
+    report.timezone = safe(() => Intl.DateTimeFormat().resolvedOptions().timeZone, null);
+    report.locale = safe(() => Intl.DateTimeFormat().resolvedOptions().locale, null);
+    report.calendar = safe(() => Intl.DateTimeFormat().resolvedOptions().calendar, null);
+    report.numberingSystem = safe(() => Intl.DateTimeFormat().resolvedOptions().numberingSystem, null);
+    report.screen = {
+      width: screen.width,
+      height: screen.height,
+      availWidth: screen.availWidth,
+      availHeight: screen.availHeight,
+      colorDepth: screen.colorDepth,
+      pixelDepth: screen.pixelDepth
+    };
+    report.screenOrientation = safe(() => screen.orientation ? {
+      type: screen.orientation.type,
+      angle: screen.orientation.angle
+    } : null, null);
+    report.window = {
+      innerWidth: innerWidth,
+      innerHeight: innerHeight,
+      outerWidth: outerWidth,
+      outerHeight: outerHeight,
+      devicePixelRatio: devicePixelRatio,
+      scrollX: scrollX,
+      scrollY: scrollY
+    };
+    report.visualViewport = safe(() => window.visualViewport ? {
+      width: visualViewport.width,
+      height: visualViewport.height,
+      scale: visualViewport.scale,
+      offsetLeft: visualViewport.offsetLeft,
+      offsetTop: visualViewport.offsetTop
+    } : null, null);
+    report.mediaQueries = mediaQueryFingerprint();
+    report.touchSupport = {
+      ontouchstart: 'ontouchstart' in window,
+      TouchEvent: typeof TouchEvent,
+      Touch: typeof Touch,
+      TouchList: typeof TouchList
+    };
+    report.webRTC = {
+      RTCPeerConnection: typeof RTCPeerConnection,
+      RTCSessionDescription: typeof RTCSessionDescription,
+      RTCIceCandidate: typeof RTCIceCandidate
+    };
+    report.canvas = await asyncSafe(canvasFingerprint, null);
+    report.webgl = safe(webglFingerprint, null);
+    report.audio = await asyncSafe(audioFingerprint, null);
+    report.fonts = safe(fontFingerprint, null);
+    report.mediaDevices = await asyncSafe(mediaFingerprint, null);
+    report.permissions = await asyncSafe(permissionFingerprint, null);
+    report.connection = safe(() => navigator.connection ? {
+      effectiveType: navigator.connection.effectiveType,
+      downlink: navigator.connection.downlink,
+      rtt: navigator.connection.rtt,
+      saveData: navigator.connection.saveData
+    } : null, null);
+    report.plugins = safe(() => Array.from(navigator.plugins || []).map(plugin => plugin.name), null);
+    report.mimeTypes = safe(() => Array.from(navigator.mimeTypes || []).map(type => type.type), null);
+    report.secureContext = window.isSecureContext;
+    report.crossOriginIsolated = window.crossOriginIsolated;
+    report.hasFocus = document.hasFocus();
+    report.visibilityState = document.visibilityState;
+    report.referrer = document.referrer;
+    report.href = location.href.split('?')[0];
+
+    const text = JSON.stringify(report, null, 2);
+    out.textContent = text;
+    return text;
+  }
+
+  async function run() {
+    out.textContent = 'Собираю…';
+    try {
+      await collect();
+    } catch (error) {
+      out.textContent = 'Ошибка: ' + String(error);
+    }
+  }
+
+  document.getElementById('copy').addEventListener('click', async () => {
+    const text = out.textContent || '';
+    try {
+      await navigator.clipboard.writeText(text);
+      out.textContent = text + '\n\n[скопировано]';
+    } catch (error) {
+      const area = document.createElement('textarea');
+      area.value = text;
+      document.body.appendChild(area);
+      area.select();
+      document.execCommand('copy');
+      area.remove();
+      out.textContent = text + '\n\n[скопировано]';
+    }
+  });
+
+  document.getElementById('download').addEventListener('click', () => {
+    const blob = new Blob([out.textContent || ''], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'antik-fingerprint.json';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  });
+
+  document.getElementById('run').addEventListener('click', () => { void run(); });
+  void run();
+})();
+</script>
+</body>
+</html>
